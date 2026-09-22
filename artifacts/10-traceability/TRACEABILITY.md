@@ -241,3 +241,34 @@
 🟡 EPIC-TRANS (US-006, US-050) — частично  
 🟡 EPIC-DIAR (US-003) — частично  
 🟡 EPIC-PROTOCOL (US-010) — частично
+
+## Changelog 2026-09-22
+
+### Новые US-карточки
+
+- **US-058** — VAD параметры (whisper_vad_filter, vad_min_silence_duration_ms и др.)
+  - **Backend:** `app/core/config.py` (Settings)
+  - **Transcription:** `app/services/transcription.py` (vad_parameters)
+  - **Документация:** hmp-errors-database E118
+  
+- **US-079** — GPU ускорение Whisper (CUDA + cuDNN)
+  - **Backend:** `app/services/transcription.py` (`_load_model` — cudnn auto-detect)
+  - **Документация:** `docs/INSTALL_GPU.md`
+  - **Документация:** hmp-errors-database E111
+
+- **US-080** — Heartbeat прогресс при транскрипции
+  - **Backend:** `app/services/transcription.py` (heartbeat_progress)
+  - **Frontend:** `src/js/views/protocol.js` (updateProgressBar uses message)
+  - **Документация:** hmp-errors-database E113, E114
+
+### Backend refactor
+
+- **task_status.py** (новый модуль) — `update_task_status_in_db()` для fire-and-forget DB updates
+- **active_tasks.py** (новый модуль) — registry asyncio.Task (без циклических импортов)
+- **transcription_progress.py** — cancel_job теперь sync 3-местный sync
+
+### Bug fixes (E081-E117)
+
+- E115: greenlet_spawn fix (AsyncSessionLocal)
+- E116: no circular imports
+- E117: NameError: name 'router' is not defined

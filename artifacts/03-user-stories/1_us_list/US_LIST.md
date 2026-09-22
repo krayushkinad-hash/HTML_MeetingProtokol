@@ -140,3 +140,22 @@
 
 - **Предыдущий шаг:** `user-persona-builder` (`artifacts/02-personas/PERSONAS.md`) ✅
 - **Следующий шаг:** `business-process-modeler` (`artifacts/04-processes/`) — процессы as-is → to-be на основе этих US
+
+## US-078: Whisper Models — Скачивание и управление моделями
+- **Status:** Done
+- **Файл:** `US_078.md`
+
+## US-079: GPU ускорение Whisper
+- **Status:** Documented
+- **Файл:** `US_079.md`
+- **Описание:** CUDA + cuDNN поддержка с auto-detect
+
+## US-080: Heartbeat прогресс при транскрипции
+- **Status:** Done
+- **Файл:** `US_080.md`
+- **Описание:** Живой прогресс каждые 2 сек с message "Обработка аудио... Nс"
+
+## US-058: Whisper Models — VAD параметры
+- **Status:** Done (E118)
+- **Файл:** `US_058.md`
+- **Описание:** Настраиваемые параметры VAD (min_silence, threshold, speech_pad)

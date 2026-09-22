@@ -6,6 +6,7 @@ Chunks of 30 sec per NFR §QG-7.
 US-005: Real Whisper integration with progress tracking.
 """
 import asyncio
+import time  # E119: used for transcribe_start_time / heartbeat elapsed
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

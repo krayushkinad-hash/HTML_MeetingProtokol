@@ -766,3 +766,29 @@ Response:
 ```
 
 Используйте чтобы проверить что proxy vars очищены. Если `ALL_PROXY` или `SOCKS_PROXY` не null — перезапустите backend после очистки env vars.
+
+## Settings API (env-based)
+
+### Whisper Configuration
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `WHISPER_DEVICE` | `cuda` / `cpu` | `cpu` | Inference device (E111 auto-detect cudnn) |
+| `WHISPER_COMPUTE_TYPE` | `float16` / `int8` / `float32` | `int8` | Quantization |
+| `WHISPER_VAD_FILTER` | `bool` | `false` | Voice Activity Detection (E118) |
+| `VAD_MIN_SILENCE_DURATION_MS` | `int` | `1000` | Min silence to trim (E118) |
+| `VAD_SPEECH_PAD_MS` | `int` | `300` | Padding around speech (E118) |
+| `VAD_THRESHOLD` | `float` | `0.5` | Speech threshold 0-1 (E118) |
+
+### Example .env
+
+```ini
+# Use GPU
+WHISPER_DEVICE=cuda
+WHISPER_COMPUTE_TYPE=float16
+
+# VAD on (for clean speech)
+WHISPER_VAD_FILTER=true
+VAD_MIN_SILENCE_DURATION_MS=1000
+VAD_THRESHOLD=0.5
+```
