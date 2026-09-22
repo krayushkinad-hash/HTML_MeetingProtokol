@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Font Awesome (US-071) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <title>HTML_MeetingProtokol</title>
+    <meta name="description" content="Локальное приложение протоколов совещаний">
+    <link rel="stylesheet" href="src/css/main.css">
+    <link rel="stylesheet" href="src/css/components.css">
+    <link rel="stylesheet" href="src/css/protocol.css">
+    <link rel="stylesheet" href="src/css/live.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Router-managed view, replaced by Router -->
+        <header class="app-header">
+            <h1><i class="fa-solid fa-video"></i> HTML_MeetingProtokol</h1>
+            <nav class="nav">
+                <a href="#/" class="nav-link">Протоколы</a>
+                <a href="#/calendar" class="nav-link">Календарь</a>
+                <a href="#/upload" class="nav-link">Загрузить</a>
+                <a href="#/live" class="nav-link">🎥 Live</a>
+                <a href="#/settings" class="nav-link">Настройки</a>
+    <a href="#/whisper"><i class="fa-solid fa-microphone"></i> Models</a>
+            </nav>
+        </header>
+
+        <main id="view-root" class="view-root">
+            <!-- Контент рендерится JS -->
+            <div class="loading">Загрузка...</div>
+        </main>
+
+        <footer class="app-footer">
+            <p>Local-only · 152-ФЗ compliant · <span id="version">v1.0.0</span></p>
+        </footer>
+    </div>
+
+    <!-- ES modules, нативная поддержка браузерами (ADR-003) -->
+    <script type="module" src="src/js/main.js"></script>
+</body>
+</html>

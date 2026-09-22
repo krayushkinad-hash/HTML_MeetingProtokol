@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Mode (макет для скриншота)</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    /* Стили мокапа трёх панелей — только для скриншота */
+    body { background: #f7f8fa; margin: 0; padding: 0; }
+    .live-shell {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr 1.5fr;
+      gap: 12px;
+      padding: 12px;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    /* Панель 1: Видео участников */
+    .video-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      flex: 1;
+    }
+    .video-tile {
+      background: linear-gradient(135deg, #1f2937, #374151);
+      border-radius: 6px;
+      position: relative;
+      display: flex;
+      align-items: flex-end;
+      padding: 8px;
+      color: #fff;
+      font-size: 12px;
+    }
+    .video-tile.talking {
+      background: linear-gradient(135deg, #1e3a8a, #2563eb);
+      box-shadow: 0 0 0 2px #2563eb;
+    }
+    /* Панель 2: Темы */
+    .topics-list {
+      flex: 1;
+      overflow-y: auto;
+    }
+    .topic {
+      padding: 8px 10px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .topic.active {
+      background: #eff6ff;
+      border-left: 3px solid #2563eb;
+      font-weight: 500;
+    }
+    .topic.done {
+      color: #9ca3af;
+      text-decoration: line-through;
+    }
+    .topic-time {
+      color: #9ca3af;
+      font-size: 11px;
+      margin-right: 6px;
+    }
+    /* Панель 3: Транскрипция */
+    .transcript {
+      flex: 1;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .utterance {
+      padding: 8px 10px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+      border-left: 3px solid transparent;
+    }
+    .utterance.s0 { border-left-color: #2563eb; }
+    .utterance.s1 { border-left-color: #16a34a; }
+    .utterance.s2 { border-left-color: #ea580c; }
+    .utterance.s3 { border-left-color: #9333ea; }
+    .utterance.live {
+      background: #fef9c3;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    .u-meta {
+      font-size: 11px;
+      color: #6b7280;
+      margin-bottom: 4px;
+    }
+    .u-meta b { color: #1f2937; }
+    .important {
+      background: #fef3c7;
+      border: 1px solid #fbbf24;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+      margin-left: 4px;
+    }
+    /* Верхняя панель с кнопками */
+    .topbar {
+      background: #fff;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .rec-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #fef2f2;
+      color: #dc2626;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .rec-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #dc2626;
+      animation: pulse 1s infinite;
+    }
+    .url-input {
+      flex: 1;
+      padding: 4px 8px;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .timer {
+      font-family: ui-monospace, "SF Mono", monospace;
+      font-size: 12px;
+      color: #6b7280;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="rec-indicator"><span class="rec-dot"></span>ЗАПИСЬ ИДЁТ</span>
+    <span class="url-input">https://telemost.yandex.ru/j/abc123-def456</span>
+    <span class="timer">00:23:47</span>
+  </div>
+
+  <div class="live-shell">
+    <!-- Панель 1: Видео -->
+    <div class="panel">
+      <h3>Участники · 5</h3>
+      <div class="video-grid">
+        <div class="video-tile talking">
+          <span>Алексей К. (вы)</span>
+        </div>
+        <div class="video-tile">
+          <span>Петров П.П.</span>
+        </div>
+        <div class="video-tile">
+          <span>Сидорова А.В.</span>
+        </div>
+        <div class="video-tile">
+          <span>Козлов Д.М.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Панель 2: Темы -->
+    <div class="panel">
+      <h3>Темы встречи</h3>
+      <div class="topics-list">
+        <div class="topic done"><span class="topic-time">0:05</span>Вступление и представление участников</div>
+        <div class="topic done"><span class="topic-time">0:08</span>Статус по задачам прошлой встречи</div>
+        <div class="topic active"><span class="topic-time">0:18</span>Бюджет проекта на Q4</div>
+        <div class="topic"><span class="topic-time">—</span>Сроки сдачи MVP</div>
+        <div class="topic"><span class="topic-time">—</span>Распределение ресурсов</div>
+        <div class="topic"><span class="topic-time">—</span>Риски и митигация</div>
+        <div class="topic"><span class="topic-time">—</span>Обратная связь по процессам</div>
+      </div>
+    </div>
+
+    <!-- Панель 3: Транскрипция -->
+    <div class="panel">
+      <h3>Живая транскрипция · WER 12%</h3>
+      <div class="transcript">
+        <div class="utterance s0">
+          <div class="u-meta"><b>Алексей К.</b> · 0:23:15</div>
+          <div>По бюджету на четвёртый квартал — у нас осталось 1.2 миллиона из выделенных 5. Этого хватит до конца года, но только если не будет сюрпризов от подрядчика.</div>
+        </div>
+        <div class="utterance s1">
+          <div class="u-meta"><b>Петров П.</b> · 0:23:31 <span class="important">⭐ важное</span></div>
+          <div>Согласен. Давайте зафиксируем: до 15 декабря никаких новых контрактов сверх утверждённой сметы. Если нужно больше — выносим на отдельное совещание с Логиновым.</div>
+        </div>
+        <div class="utterance s2">
+          <div class="u-meta"><b>Сидорова А.</b> · 0:23:48</div>
+          <div>А что с подрядчиком по API? Они опять сдвинули сроки интеграции. Мне кажется, мы рискуем не уложиться в дедлайн по MVP.</div>
+        </div>
+        <div class="utterance s3">
+          <div class="u-meta"><b>Козлов Д.</b> · 0:24:02</div>
+          <div>Я с ними вчера говорил. Обещают до 30 ноября закрыть критические баги, но полная интеграция — только в январе. Нужно решение, что показывать на демо 15 декабря.</div>
+        </div>
+        <div class="utterance s0 live">
+          <div class="u-meta"><b>Алексей К.</b> · 0:24:25 (live)</div>
+          <div>Окей, давайте тогда зафиксируем action items...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

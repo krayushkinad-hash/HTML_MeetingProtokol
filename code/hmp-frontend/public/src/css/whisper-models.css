@@ -1,0 +1,189 @@
+/* Whisper Models Manager UI Styles */
+
+.whisper-models-panel {
+    padding: 24px;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.whisper-models-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.whisper-models-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.whisper-model-card {
+    border: 1px solid #d4d8de;
+    border-radius: 8px;
+    padding: 16px;
+    background: #fff;
+    transition: all 0.2s;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.whisper-model-card.active {
+    border-color: #2563eb;
+    background: #eff6ff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.whisper-model-card.downloaded {
+    border-color: #16a34a;
+}
+
+.whisper-model-card.not-downloaded {
+    border-color: #94a3b8;
+}
+
+.whisper-model-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.whisper-model-meta {
+    font-size: 12px;
+    color: #5a6470;
+    line-height: 1.5;
+}
+
+.whisper-model-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: auto;
+}
+
+.whisper-btn {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #d4d8de;
+    background: #fff;
+    color: #1a1a1a;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.whisper-btn:hover:not(:disabled) {
+    background: #f8fafc;
+    border-color: #94a3b8;
+}
+
+.whisper-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.whisper-btn-primary {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+}
+
+.whisper-btn-primary:hover:not(:disabled) {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+}
+
+.whisper-btn-success {
+    background: #16a34a;
+    color: #fff;
+    border-color: #16a34a;
+}
+
+.whisper-btn-success:hover:not(:disabled) {
+    background: #15803d;
+}
+
+.whisper-btn-danger {
+    background: #dc2626;
+    color: #fff;
+    border-color: #dc2626;
+}
+
+.whisper-btn-danger:hover:not(:disabled) {
+    background: #b91c1c;
+}
+
+.whisper-progress {
+    margin-top: 8px;
+    width: 100%;
+    height: 8px;
+    border-radius: 4px;
+    background: #e5e7eb;
+    overflow: hidden;
+    display: block;
+}
+
+.whisper-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #2563eb, #3b82f6);
+    transition: width 0.3s ease-out;
+    display: block;
+    width: 0%;
+    /* Inline style from JS will override this */
+}
+
+.whisper-progress-info {
+    font-size: 11px;
+    color: #5a6470;
+    margin-top: 4px;
+    display: flex;
+    justify-content: space-between;
+}
+
+.whisper-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.whisper-badge-active {
+    background: #2563eb;
+    color: #fff;
+}
+
+.whisper-badge-downloaded {
+    background: #16a34a;
+    color: #fff;
+}
+
+.whisper-badge-not-downloaded {
+    background: #94a3b8;
+    color: #fff;
+}
+
+.whisper-cache-info {
+    margin-top: 16px;
+    padding: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #5a6470;
+}
+
+.whisper-cache-info code {
+    background: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid #d4d8de;
+    font-size: 11px;
+}
