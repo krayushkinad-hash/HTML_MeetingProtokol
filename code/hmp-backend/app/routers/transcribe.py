@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.db.models import AudioFile, Protocol
-from app.db.session import get_db
+from app.db.session import get_db, AsyncSessionLocal
 from app.schemas import TranscriptionRequest, TranscriptionStatus
 from app.services.transcription import transcription_service
 
@@ -149,6 +149,19 @@ async def run_transcription(
     try:
         from app.db.models import TranscriptionTask as _TTModel
         from datetime import datetime as _dt
+        import hashlib
+
+        # E150: вычисляем hash аудиофайла для resume-validation
+        audio_hash = None
+        try:
+            audio_path_for_hash = Path(audio_file_path_str)
+            if audio_path_for_hash.exists():
+                audio_hash = hashlib.sha256(
+                    audio_path_for_hash.read_bytes()
+                ).hexdigest()[:32]
+        except Exception as hash_err:
+            logger.warning("audio_hash_failed", error=str(hash_err))
+
         db_task = _TTModel(
             id=task_id,
             protocol_id=body.protocol_id,
@@ -156,10 +169,42 @@ async def run_transcription(
             progress=0.0,
             current_chunk=0,
             started_at=_dt.now(),
+            audio_hash=audio_hash,  # E150
         )
         db.add(db_task)
         await db.commit()
-        logger.info("transcription_task_persisted", task_id=str(task_id))
+
+        # E131/E153: очищаем старые utterances + decisions перед стартом
+        # новой транскрибации (повторная транскрибация = чистая перезапись).
+        try:
+            from sqlalchemy import delete as _del
+            from app.db.models import Utterance as _ClearU
+            from app.db.models import Decision as _ClearD
+            # Удаляем в отдельной транзакции — не блокируем основной commit
+            async with AsyncSessionLocal() as cleanup_db:
+                await cleanup_db.execute(
+                    _del(_ClearU).where(_ClearU.protocol_id == body.protocol_id)
+                )
+                await cleanup_db.execute(
+                    _del(_ClearD).where(_ClearD.protocol_id == body.protocol_id)
+                )
+                await cleanup_db.commit()
+            logger.info(
+                "transcription_reset_completed",
+                protocol_id=str(body.protocol_id),
+            )
+        except Exception as reset_err:
+            logger.warning(
+                "transcription_reset_failed",
+                protocol_id=str(body.protocol_id),
+                error=str(reset_err),
+            )
+
+        logger.info(
+            "transcription_task_persisted",
+            task_id=str(task_id),
+            audio_hash=audio_hash,
+        )
     except Exception as e:
         logger.warning("transcription_task_persist_failed", error=str(e))
         await db.rollback()
@@ -283,6 +328,194 @@ async def get_transcription_status(task_id: uuid.UUID) -> TranscriptionStatus:
             detail=f"Задача {task_id} не найдена",
         )
     return status_obj
+
+
+# ----------------------------------------------------------------------------
+# POST /transcribe/pause/{task_id}  (E150)
+# ----------------------------------------------------------------------------
+
+
+@router.post(
+    "/transcribe/pause/{task_id}",
+    summary="Pause transcription (save state for later resume)",
+)
+async def pause_transcription_endpoint(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """E150: pause running transcription, save state to DB.
+
+    Unlike cancel — does NOT delete progress. Can be resumed later
+    (including from another browser session) via /transcribe/resume/{task_id}.
+    """
+    try:
+        tid_uuid = uuid.UUID(task_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Невалидный task_id")
+
+    task = await db.get(TranscriptionTask, tid_uuid)
+    if not task:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+
+    if task.status not in ("queued", "running", "starting"):
+        return {
+            "task_id": task_id,
+            "status": task.status,
+            "message": "Задача не активна — пауза невозможна",
+        }
+
+    task.status = "paused"
+    task.paused_at = datetime.now(timezone.utc)
+    task.updated_at = task.paused_at
+
+    # E150: снимаем BG-task через cancel без удаления из реестра
+    from app.services.active_tasks import _active_transcription_tasks
+
+    bg_task = _active_transcription_tasks.get(task_id)
+    if bg_task and not bg_task.done():
+        bg_task.cancel()  # cancellation вызовет CancelledError → finally отработает
+
+    await db.commit()
+    logger.info(
+        "transcribe_paused",
+        task_id=task_id,
+        progress=task.progress,
+        last_processed_sec=task.last_processed_sec,
+    )
+    return {
+        "task_id": task_id,
+        "status": "paused",
+        "progress": task.progress,
+        "paused_at": task.paused_at.isoformat(),
+        "can_resume": True,
+        "message": "Транскрипция поставлена на паузу. Можно продолжить через /transcribe/resume/{task_id}",
+    }
+
+
+# ----------------------------------------------------------------------------
+# POST /transcribe/resume/{task_id}  (E150)
+# ----------------------------------------------------------------------------
+
+
+@router.post(
+    "/transcribe/resume/{task_id}",
+    summary="Resume paused transcription",
+)
+async def resume_transcription_endpoint(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """E150: resume a paused task — continue from last_processed_sec.
+
+    Works across sessions: state stored in DB (paused_at, segments_so_far_json,
+    last_processed_sec).
+    """
+    try:
+        tid_uuid = uuid.UUID(task_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Невалидный task_id")
+
+    task = await db.get(TranscriptionTask, tid_uuid)
+    if not task:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+
+    if task.status != "paused":
+        return {
+            "task_id": task_id,
+            "status": task.status,
+            "message": f"Задача в статусе '{task.status}' — resume невозможен (нужен 'paused')",
+        }
+
+    # Получаем protocol + audio_file
+    from app.db.models import Protocol, AudioFile
+
+    protocol = await db.get(Protocol, task.protocol_id)
+    if not protocol or not protocol.audio_file_id:
+        raise HTTPException(status_code=400, detail="Протокол без аудиофайла")
+    audio_file = await db.get(AudioFile, protocol.audio_file_id)
+    if not audio_file:
+        raise HTTPException(status_code=400, detail="Аудиофайл не найден")
+
+    # E151: проверить hash аудио — если изменился, перетранскрибировать с нуля
+    import hashlib
+
+    from pathlib import Path as PathLib
+
+    audio_path = PathLib(audio_file.file_path)
+    if audio_path.exists():
+        current_hash = hashlib.sha256(audio_path.read_bytes()).hexdigest()[:32]
+        if task.audio_hash and task.audio_hash != current_hash:
+            logger.warning(
+                "resume_audio_changed",
+                task_id=task_id,
+                old_hash=task.audio_hash,
+                new_hash=current_hash,
+            )
+            # Reset progress and we'll re-transcribe from start
+            task.last_processed_sec = 0.0
+            task.segments_so_far_json = None
+            task.progress = 0.0
+
+    # Запускаем новую BG-task — передаём уже имеющиеся сегменты
+    import json as _json
+
+    already_done = []
+    if task.segments_so_far_json:
+        try:
+            already_done = _json.loads(task.segments_so_far_json)
+        except Exception:
+            already_done = []
+
+    audio_path = PathLib(audio_file.file_path)
+
+    async def _resume_runner() -> None:
+        try:
+            from app.services.transcription import transcription_service
+            from app.services.task_status import update_task_status_in_db
+
+            task.status = "running"
+            task.paused_at = None
+            await db.commit()
+
+            # E152: continue_from_sec — Whisper модели не поддерживают
+            # "продолжить с произвольной секунды". Workaround:
+            # 1. audio_segmentation через ffmpeg ИЛИ
+            # 2. Re-transcribe с начала + дедупликация по text+start_sec
+            # Здесь делаем simplified версию: полная транскрибация,
+            # append в существующий queue (применяется фильтр dedup)
+            result = await transcription_service.transcribe(
+                protocol_id=task.protocol_id,
+                audio_path=audio_path,
+                task_id=tid_uuid,
+                duration_sec=audio_file.duration_sec,
+                already_done_segments=already_done,
+                resume_from_sec=task.last_processed_sec or 0.0,
+            )
+            await update_task_status_in_db(
+                tid_uuid, "completed", progress=100.0,
+                message="Завершено (возобновлено)",
+            )
+        except Exception as exc:
+            logger.exception("transcribe_resume_failed", error=str(exc))
+            try:
+                from app.services.task_status import update_task_status_in_db
+                await update_task_status_in_db(tid_uuid, "failed", error=str(exc)[:500])
+            except Exception:
+                pass
+
+    bg_task = asyncio.create_task(_resume_runner())
+    from app.services.active_tasks import register_active_task, _active_transcription_tasks
+
+    if not bg_task.done():
+        register_active_task(str(tid_uuid), bg_task)
+
+    return {
+        "task_id": task_id,
+        "status": "running",
+        "resume_from_sec": task.last_processed_sec or 0.0,
+        "previously_done_segments": len(already_done),
+        "message": "Транскрипция возобновлена",
+    }
 
 
 @router.post(

@@ -128,8 +128,15 @@ class TranscriptionService:
         audio_path: Path,
         task_id: uuid.UUID,
         duration_sec: float | None = None,
+        already_done_segments: list | None = None,  # E150: для resume
+        resume_from_sec: float | None = None,        # E150: для resume
     ) -> TranscriptionStatus:
-        """Transcribe audio file with progress tracking."""
+        """Transcribe audio file with progress tracking.
+
+        E150: при resume уже завершённые сегменты могут быть переданы
+        в already_done_segments → мы их сразу запишем в БД, без повторной
+        обработки Whisper.
+        """
         status = TranscriptionStatus(
             id=task_id,
             protocol_id=protocol_id,
@@ -276,6 +283,9 @@ class TranscriptionService:
 
                 Runs from the main event loop (not from a worker thread),
                 so asyncio.create_task inside is safe.
+
+                E150: also save last_processed_sec + segments_so_far_json
+                for resume (pause/resume — E150).
                 """
                 from app.services.task_status import update_task_status_in_db
                 while not stop_heartbeat.is_set():
@@ -286,6 +296,39 @@ class TranscriptionService:
                             progress=float(status.progress_percent),
                             message=status.message or "",
                         )
+
+                        # E150: параллельно сохраняем state для возможного resume
+                        try:
+                            from app.db.models import TranscriptionTask as _TT
+                            from app.db.session import AsyncSessionLocal
+                            from sqlalchemy import select as _sel
+                            from app.db.models import Utterance as _Utt
+                            import json as _json
+                            async with AsyncSessionLocal() as ps:
+                                # Получаем последний сохранённый segment для time-tracking
+                                last_seg_q = await ps.execute(
+                                    _sel(_Utt).where(_Utt.protocol_id == protocol_id)
+                                    .order_by(_Utt.start_sec.desc()).limit(1)
+                                )
+                                last_seg = last_seg_q.scalar_one_or_none()
+                                if last_seg:
+                                    t = await ps.get(_TT, task_id)
+                                    if t:
+                                        # Сохраняем уже сохранённые utterance
+                                        segs_q = await ps.execute(
+                                            _sel(_Utt.start_sec, _Utt.end_sec, _Utt.text)
+                                            .where(_Utt.protocol_id == protocol_id)
+                                            .order_by(_Utt.start_sec.asc())
+                                        )
+                                        segs = segs_q.all()
+                                        t.segments_so_far_json = _json.dumps(
+                                            [{"start": float(s[0]), "end": float(s[1]), "text": s[2]} for s in segs]
+                                        )
+                                        t.last_processed_sec = float(last_seg.end_sec)
+                                        await ps.commit()
+                        except Exception as state_err:
+                            logger.debug("resume_state_save_skipped", error=str(state_err))
+
                         logger.debug(
                             "progress_persisted_to_db",
                             task_id=str(task_id),
@@ -540,18 +583,55 @@ class TranscriptionService:
             if not batch:
                 return
             try:
+                # E137: Группировка сегментов по паузам (≤1.5 сек)
+                GROUP_PAUSE_THRESHOLD = 1.5
+                grouped = []
+                current = None
+
+                # E153: дедупликация по (start_sec, end_sec) внутри batch
+                # Если в очереди уже есть одинаковые timestamps от retry — пропустить
+                seen_starts = set()
+                for seg in batch:
+                    seg_start = float(seg.get("start", 0))
+                    seg_end = float(seg.get("end", 0))
+                    if seg_start in seen_starts:
+                        continue  # уже в этом batch — пропускаем дубль
+                    seen_starts.add(seg_start)
+
+                    if current is None:
+                        current = {
+                            "start": seg_start,
+                            "end": seg_end,
+                            "texts": [seg.get("text", "")],
+                        }
+                    else:
+                        pause = seg_start - current["end"]
+                        if pause <= GROUP_PAUSE_THRESHOLD:
+                            current["texts"].append(seg.get("text", ""))
+                            current["end"] = seg_end
+                        else:
+                            grouped.append(current)
+                            current = {
+                                "start": seg_start,
+                                "end": seg_end,
+                                "texts": [seg.get("text", "")],
+                            }
+
+                if current is not None:
+                    grouped.append(current)
+
                 async with AsyncSessionLocal() as session:
-                    for seg in batch:
-                        text = (seg.get("text") or "").strip()
-                        if not text:
+                    for g in grouped:
+                        merged_text = " ".join(t.strip() for t in g["texts"] if t.strip()).strip()
+                        if not merged_text:
                             continue
                         u = Utterance(
                             protocol_id=protocol_id,
                             speaker_id=None,
-                            start_sec=Decimal(str(round(seg["start"], 3))),
-                            end_sec=Decimal(str(round(seg["end"], 3))),
-                            text=text,
-                            text_original=text,
+                            start_sec=Decimal(str(round(g["start"], 3))),
+                            end_sec=Decimal(str(round(g["end"], 3))),
+                            text=merged_text,
+                            text_original=merged_text,
                             confidence=None,
                             low_confidence=False,
                             important=False,
@@ -559,11 +639,11 @@ class TranscriptionService:
                         )
                         session.add(u)
                     await session.commit()
-                batch_total += len(batch)
+                batch_total += len(grouped)
                 logger.info(
                     "utterances_batch_saved",
                     protocol_id=str(protocol_id),
-                    batch_size=len(batch),
+                    batch_size=len(grouped),
                     total=batch_total,
                 )
             except Exception as e:
@@ -618,7 +698,13 @@ class TranscriptionService:
     ) -> int:
         """Сохранить сегменты Whisper в таблицу utterance.
 
-        E129: без этого 298 (или сколько нашлось бы) реплик теряются.
+        E129/E137: без этого 298 (или сколько нашлось бы) реплик теряются.
+        E137: ГРУППИРОВКА — объединяем соседние сегменты в одну реплику:
+        - Если между seg[i].end и seg[i+1].start пауза <= 1.5 сек И
+          один speaker (тут все speaker_id=None, поэтому любая последовательность) →
+          объединяем текст и расширяем start_sec/end_sec.
+        - Иначе — отдельная реплика.
+        Это сокращает ~250 сегментов до ~30-50 реплик (по фразам).
 
         - Удаляет старые utterance для этого protocol_id (перезапись при повторной транскрибации)
         - Вставляет новые сегменты
@@ -634,33 +720,92 @@ class TranscriptionService:
 
         inserted = 0
         async with AsyncSessionLocal() as session:
-            # Перезапись: старая транскрибация больше не актуальна
-            await session.execute(
-                delete(Utterance).where(Utterance.protocol_id == protocol_id)
-            )
+            # E153: перезапись при повторной транскрибации —
+            # удаляем все старые Utterance для этого протокола.
+            # Используем DELETE + commit сначала, чтобы flush прошёл до INSERT.
+            try:
+                await session.execute(
+                    delete(Utterance).where(Utterance.protocol_id == protocol_id)
+                )
+                await session.commit()  # отдельный commit чтобы DELETE был виден
+                # Переоткрываем транзакцию для INSERT
+                await session.begin()
+                logger.info(
+                    "utterances_cleared_for_retranscription",
+                    protocol_id=str(protocol_id),
+                )
+            except Exception as clear_err:
+                logger.warning("utterances_clear_failed", error=str(clear_err))
+                await session.rollback()
+
+            # E137: Группировка последовательных сегментов
+            GROUP_PAUSE_THRESHOLD = 1.5  # секунд — если пауза больше, новая реплика
+            grouped = []
+            current = None
 
             for seg in segments_list:
                 text = (seg.text or "").strip()
                 if not text:
-                    continue  # пропускаем пустые
+                    continue
 
-                # avg_logprob → грубая оценка confidence (0..1)
-                conf = None
                 alp = getattr(seg, "avg_logprob", None)
+                conf = None
                 if alp is not None:
                     import math
                     conf = Decimal(str(round(min(1.0, max(0.0, math.exp(alp))), 3)))
 
+                seg_end = float(seg.end)
+                seg_start = float(seg.start)
+
+                if current is None:
+                    current = {
+                        "start": seg_start,
+                        "end": seg_end,
+                        "texts": [text],
+                        "confs": [conf],
+                    }
+                else:
+                    pause = seg_start - current["end"]
+                    if pause <= GROUP_PAUSE_THRESHOLD:
+                        # Объединяем в текущую реплику
+                        current["texts"].append(text)
+                        current["confs"].append(conf)
+                        current["end"] = seg_end
+                    else:
+                        # Закрываем текущую, начинаем новую
+                        grouped.append(current)
+                        current = {
+                            "start": seg_start,
+                            "end": seg_end,
+                            "texts": [text],
+                            "confs": [conf],
+                        }
+
+            if current is not None:
+                grouped.append(current)
+
+            # Вставляем группы в БД
+            for g in grouped:
+                # Берём средний confidence
+                valid_confs = [c for c in g["confs"] if c is not None]
+                avg_conf = None
+                if valid_confs:
+                    s = sum(valid_confs)
+                    avg_conf = Decimal(str(round(s / len(valid_confs), 3)))
+
+                # Склеиваем текст через пробел (с заглавной в начале предложения)
+                merged_text = " ".join(g["texts"]).strip()
+
                 u = Utterance(
                     protocol_id=protocol_id,
                     speaker_id=None,
-                    start_sec=Decimal(str(round(float(seg.start), 3))),
-                    end_sec=Decimal(str(round(float(seg.end), 3))),
-                    text=text,
-                    text_original=text,
-                    confidence=conf,
+                    start_sec=Decimal(str(round(g["start"], 3))),
+                    end_sec=Decimal(str(round(g["end"], 3))),
+                    text=merged_text,
+                    text_original=merged_text,
+                    confidence=avg_conf,
                     low_confidence=bool(
-                        conf is not None and conf < Decimal("0.4")
+                        avg_conf is not None and avg_conf < Decimal("0.4")
                     ),
                     important=False,
                     corrected_by_llm=False,
@@ -670,11 +815,13 @@ class TranscriptionService:
 
             await session.commit()
 
-        logger.info(
-            "utterances_saved",
-            protocol_id=str(protocol_id),
-            count=inserted,
-        )
+            logger.info(
+                "utterances_grouped_and_saved",
+                protocol_id=str(protocol_id),
+                input_segments=len(segments_list),
+                grouped_count=inserted,
+            )
+
         return inserted
 
     def get_status(self, task_id) -> TranscriptionStatus | None:

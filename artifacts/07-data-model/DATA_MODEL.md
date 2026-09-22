@@ -497,3 +497,55 @@ LIMIT 1;
 2. **Batch (legacy/fallback):**
    - `transcription_service._save_utterances` пишет одной транзакцией в конце
    - Подходит для тестов / коротких записей (< 30 сек)
+
+## DiarizationResult (E141, heuristic)
+
+```python
+class DiarizationResult(Base):
+    pipeline_version = "heuristic-v1"  # Не pyannote!
+    der_score = None                   # N/A для эвристики
+    num_speakers_detected: int
+    segments_json: list  # [{turn_index, start_sec, end_sec, utt_count}]
+```
+
+Алгоритм: пауза > 2 сек = граница спикера. Speaker записи создаются с `display_name="Speaker N"`, цветом из 6-палитры.
+
+## Multilingual fields (E148-E149)
+
+```python
+class Protocol(Base):
+    language: str = "ru"  # E148: язык совещания (по умолчанию ru)
+    translation_language: str | None = None  # E149: целевой язык
+
+class Utterance(Base):
+    text: str               # ОРИГИНАЛ (на language протокола)
+    translation_language: str | None  # E149: например "en"
+    translation_text: str | None      # E149: переведённый текст
+```
+
+Логика:
+- `text` всегда на `protocol.language` (оригинал)
+- `translation_text` опционально — появляется только после перевода
+- `translation_language` указывает НА КАКОЙ язык сделан перевод
+- Если translation_language == protocol.language → перевод не нужен (одинаковый язык)
+
+## Pause/Resume fields (E150)
+
+```python
+class TranscriptionTask(Base):
+    id: UUID
+    protocol_id: UUID
+    status: str  # queued, running, paused, completed, failed, cancelled
+    
+    # E150: Pause/Resume state
+    paused_at: datetime | None
+    last_processed_sec: float | None
+    segments_so_far_json: str | None  # JSON list of dicts
+    audio_hash: str | None            # SHA-256[:32] for resume validation
+```
+
+Логика:
+- `paused_at != None` ↔ транскрибация на паузе
+- `last_processed_sec` обновляется каждые 2 сек в `persist_progress_loop`
+- `segments_so_far_json` — все utterance этого протокола (для возможности re-process)
+- `audio_hash` — для E151 (проверка при resume что файл тот же)

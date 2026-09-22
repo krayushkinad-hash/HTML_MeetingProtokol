@@ -39,7 +39,7 @@ class Base(DeclarativeBase):
 # ============================================================================
 
 protocol_status_enum = ENUM(
-    "loaded", "transcribing", "diarizing", "ready", "failed",
+    "loaded", "transcribing", "diarizing", "ready", "failed", "live",
     name="protocol_status",
 )
 audio_source_enum = ENUM("local", "url", "telegram", name="audio_source")
@@ -201,7 +201,12 @@ class Protocol(Base):
     agenda: Mapped[str | None] = mapped_column(Text)
     decisions_summary: Mapped[str | None] = mapped_column(Text)
     duration_sec: Mapped[int | None] = mapped_column(Integer)
+    language: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="ru"
+    )  # E148: язык совещания (по умолчанию ru)
     wer_quality: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    translation_language: Mapped[str | None] = mapped_column(String(10))
+    # E149: язык перевода utterance (None = нет перевода)
     status: Mapped[str] = mapped_column(
         protocol_status_enum, nullable=False, server_default="loaded"
     )
@@ -282,6 +287,18 @@ class TranscriptionTask(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # E150: Pause / Resume — между сессиями
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_processed_sec: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # до какого момента в аудио дошли
+    segments_so_far_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON: уже обработанные сегменты (для resume без перетранскрибации)
+    audio_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # E153: hash аудиофайла чтобы resume не работал с другой записью
+
     __table_args__ = (
         Index("idx_task_protocol", "protocol_id"),
         Index("idx_task_status", "status"),
@@ -361,6 +378,9 @@ class Utterance(Base):
     end_sec: Mapped[float] = mapped_column(Numeric(10, 3), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     text_original: Mapped[str | None] = mapped_column(Text)
+    # E149: перевод на другой язык (например "en" для английского)
+    translation_language: Mapped[str | None] = mapped_column(String(10))
+    translation_text: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
     low_confidence: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     important: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")

@@ -342,3 +342,130 @@ End-to-end сценарий (для часовой записи):
 3. Через 30 сек — `segments_count=25`
 4. Через 5 мин — `segments_count=50`
 5. После завершения — финальная перезагрузка → все 298 реплик
+
+## US-082 — UX-полировка
+
+### Frontend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `appendUtteranceItems` | protocol.js | Append-only rendering (E133) |
+| `renderUtteranceItem` | protocol.js | 3-уровневый speaker fallback (E144) |
+| CSS `.utterance-item` | protocol.css | Compact cards ~30px (E143) |
+| `_pollingActive` flag | protocol.js | Защита от двойного polling (E134) |
+| `renderTranscriptTab` | protocol.js | E138: hidden снимается, auto-tab |
+| AI cleanup handler | protocol.js | E142: группировка по speaker_id |
+
+### Backend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `services/diarization.py` | (новый) | E141: heuristic diarization |
+| `routers/diarize.py` | | E141: реальный вызов вместо stub |
+| `routers/utterances.py` | | E133: `after_sec` параметр |
+| `_save_utterances` | services/transcription.py | E137: группировка seg≤1.5s |
+
+### US-082 ↔ E-codes
+
+| E-код | Связь |
+|---|---|
+| E133 | append-only + after_sec |
+| E134 | защита от двойного polling |
+| E137 | группировка Whisper сегментов |
+| E138 | hidden снимается, auto-tab |
+| E140 | click handler |
+| E143 | compact cards |
+| E144 | speaker badges fallback |
+
+## US-083 — Ручная пометка решений + AI auto-extract
+
+### Frontend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `renderUtteranceItem` | protocol.js | Кнопка `+ ⚖️` или `⚖️` на каждой реплике (E146) |
+| `wireDecisionButtons` | protocol.js | Обработчик create/delete Decision |
+| `btn-extract-decisions` | protocol.js | E147: AI auto-extract с дедупликацией |
+| `renderDecisionsTab` | protocol.js | Таблица с таймкодами + сортировка |
+
+### Backend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `POST /decisions` | routers/decisions.py | + `timestamp_sec` денормализованный |
+| `GET /protocols/{id}/decisions` | routers/decisions.py | JOIN с utterances, возвращает timestamp_sec |
+| `POST /ai/extract-decisions` | routers/ai.py | E147: MOCK эвристика + возвращает ExtractedDecision |
+
+### US-083 ↔ E-коды
+
+| E-код | Описание |
+|---|---|
+| E146 | Ручная пометка решений |
+| E147 | AI auto-extract (MOCK) |
+| E148 | Язык протокола (ru по умолчанию) |
+| E149 | AI-перевод utterances на другой язык |
+
+---
+
+## E148/E149 — Multilingual
+
+### Frontend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `<select id="select-protocol-language">` | protocol.js | Выбор языка совещания (E148) |
+| `<select id="select-translation-language">` | protocol.js | Выбор целевого языка (E149) |
+| `btn-translate` handler | protocol.js | POST `/ai/translate`, append-only rendering |
+| `renderUtteranceItem` (.translation_block) | protocol.js | E149: показ перевода под оригиналом |
+| `ai.cleanupText({language: protocol.language})` | protocol.js | E148: передача языка в LLM |
+
+### Backend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `Protocol.language: str` | db/models.py | E148 |
+| `Protocol.translation_language: str \| None` | db/models.py | E149 |
+| `Utterance.translation_text/language` | db/models.py | E149 |
+| `migrations/2026_09_23_add_language_fields.py` | scripts/migrations/ | ALTER TABLE |
+| `POST /ai/translate` | routers/ai.py | E149: MOCK-перевод с кэшированием |
+| `PATCH /protocols/{id}` | routers/protocols.py | E148/E149: смена языка |
+| `protocols.router.start_transcription` | routers/transcribe.py | E148: language в TranscriptionRequest |
+
+## US-084 — Pause/Resume транскрибации + чистая ретранскрибация
+
+### Frontend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `#btn-pause-transcription` | protocol.js | E150: ⏸ Пауза |
+| `#btn-resume-transcription` | protocol.js | E150: ▶ Продолжить |
+| Polling переключатель | protocol.js | При status="paused" → скрыть Pause, показать Resume |
+| `api.pauseTranscription / resumeTranscription` | api/client.js | E150: вызовы |
+
+### Backend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `POST /transcribe/pause/{id}` | routers/transcribe.py | E150: cancel BG-task + save state |
+| `POST /transcribe/resume/{id}` | routers/transcribe.py | E150/E151: new BG-task + audio_hash check |
+| `pause_transcription_endpoint` | routers/transcribe.py | Status="paused", paused_at=now() |
+| `resume_transcription_endpoint` | routers/transcribe.py | Новый _runner с already_done_segments |
+| `transcription_reset_completed` log | routers/transcribe.py | E153: после DELETE |
+
+### Data Model
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `TranscriptionTask.paused_at` | TIMESTAMP | Когда поставлена на паузу |
+| `TranscriptionTask.last_processed_sec` | FLOAT | Последний обработанный момент |
+| `TranscriptionTask.segments_so_far_json` | TEXT | JSON с уже обработанными segments |
+| `TranscriptionTask.audio_hash` | VARCHAR(64) | E151: SHA-256[:32] |
+
+### US-084 ↔ E-коды
+
+| E-код | Описание |
+|---|---|
+| E150 | Pause / Resume endpoint + state в БД |
+| E151 | Audio hash validation |
+| E152 | Известное ограничение (Whisper не умеет resume) |
+| E153 | DELETE в router для повторной транскрибации |

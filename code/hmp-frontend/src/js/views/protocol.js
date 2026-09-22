@@ -22,16 +22,17 @@ console.log('protocol.js loaded');
 export async function renderProtocolDetail(rootEl, protocolId) {
     rootEl.innerHTML = '<div class="loading"><div class="spinner"></div> Загрузка протокола...</div>';
 
-    let protocol, utterances, speakers, summary, tags, actionItems, screenshots, decisions;
+    let protocol, utterances, utterancesRaw, speakers, summary, tags, actionItems, screenshots, decisions;
     // US-053: helper to safely cast any value to array
     const safeArray = (x) => Array.isArray(x) ? x : [];
 
     // US-047: Сначала пробуем загрузить с сервера
     let serverSuccess = false;
     try {
-        [protocol, utterances, speakers, summary, tags, actionItems, screenshots, decisions] = await Promise.all([
+        [protocol, utterancesRaw, speakers, summary, tags, actionItems, screenshots, decisions] = await Promise.all([
             api.getProtocol(protocolId),
-            api.listUtterances(protocolId, { limit: 100 }).catch(() => []),
+            // E138: limit=500 чтобы получить все реплики (вместо 100)
+            api.listUtterances(protocolId, { limit: 500 }).catch(() => []),
             api.listSpeakers(protocolId).catch(() => []),
             api.getSummary(protocolId).catch(() => null),
             api.listTags(protocolId).catch(() => []),
@@ -39,6 +40,13 @@ export async function renderProtocolDetail(rootEl, protocolId) {
             api.listScreenshots ? api.listScreenshots(protocolId).catch(() => []) : Promise.resolve([]),
             api.listDecisions ? api.listDecisions(protocolId).catch(() => []) : Promise.resolve([]),
         ]);
+
+        // E138: API возвращает {total, skip, limit, items}, извлекаем items
+        if (utterancesRaw && typeof utterancesRaw === 'object' && !Array.isArray(utterancesRaw)) {
+            utterances = Array.isArray(utterancesRaw.items) ? utterancesRaw.items : [];
+        } else {
+            utterances = safeArray(utterancesRaw);
+        }
 
         // Cache в IndexedDB (только если основной протокол загружен)
         if (protocol && protocol.id) {
@@ -90,6 +98,12 @@ export async function renderProtocolDetail(rootEl, protocolId) {
         Array.isArray(screenshots) ? screenshots : [],
         Array.isArray(decisions) ? decisions : []
     );
+
+    // E138: если есть готовые реплики — сразу активируем вкладку транскрипта
+    if (Array.isArray(utterances) && utterances.length > 0) {
+        const transcriptTab = document.querySelector('[aria-controls="panel-transcript"]');
+        if (transcriptTab) transcriptTab.click();
+    }
 
     // Check if transcription is already running for this protocol
     checkExistingTranscription(protocol);
@@ -271,25 +285,863 @@ function switchTab(tabId, protocol, utterances, speakers, summary, tags, actionI
 
 function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
     const panel = rootEl.querySelector('#panel-transcript');
+    // E138: убираем hidden чтобы панель была видна
+    if (panel) panel.removeAttribute('hidden');
+
+    // E146: Загружаем decisions для отображения значка ⚖️
+    let decisionIds = new Set();
+    try {
+        api.listDecisions(protocol.id).then(decisions => {
+            const list = panel.querySelector('.transcript-list');
+            if (!list) return;
+            decisionIds = new Set(decisions
+                .filter(d => d.source_utterance_id)
+                .map(d => d.source_utterance_id));
+            // E146: подсвечиваем решения
+            for (const d of decisions) {
+                if (d.source_utterance_id) {
+                    const item = list.querySelector(`[data-id="${d.source_utterance_id}"]`);
+                    if (item) item.classList.add('is-decision');
+                }
+            }
+        });
+    } catch (e) { console.warn('Failed to load decisions:', e); }
+
     if (!utterances.length) {
         panel.innerHTML = `<empty-state icon="<i class="fa-regular fa-note-sticky"></i>" title="Нет транскрипции" description="Запустите транскрипцию чтобы получить распознанный текст." action-label="<i class="fa-solid fa-play"></i> Транскрибировать"></empty-state>`;
         return;
     }
     panel.innerHTML = `
         <div class="transcript-toolbar">
+            <button class="btn" id="btn-check-all-grammar" title="E154: проверить грамматику всех реплик">🔍 Проверить всё</button>
+            <button class="btn" id="btn-apply-all-corrections" title="E154: применить все исправления сразу" style="display:none;">✏️ Применить всё</button>
             <button class="btn" id="btn-cleanup-ai">✨ Исправить через AI</button>
-            <span class="text-muted">${utterances.length} реплик · ${speakers.length} ораторов</span>
+            <button class="btn" id="btn-pause-transcription" title="E150: поставить на паузу (сохраняет прогресс, можно продолжить позже)">⏸ Пауза</button>
+            <button class="btn" id="btn-resume-transcription" title="E150: продолжить приостановленную транскрибацию" style="display:none;">▶ Продолжить</button>
+            <button class="btn" id="btn-diarize"><i class="fa-solid fa-users"></i> Диаризация</button>
+            <button class="btn" id="btn-extract-decisions"><i class="fa-solid fa-magnifying-glass-chart"></i> 🤖 Найти решения</button>
+            <select id="select-protocol-language" class="select-tiny" title="E148: Язык совещания">
+                <option value="ru" ${protocol.language === 'ru' ? 'selected' : ''}>🇷🇺 Русский</option>
+                <option value="en" ${protocol.language === 'en' ? 'selected' : ''}>🇬🇧 English</option>
+                <option value="de" ${protocol.language === 'de' ? 'selected' : ''}>🇩🇪 Deutsch</option>
+                <option value="es" ${protocol.language === 'es' ? 'selected' : ''}>🇪🇸 Español</option>
+                <option value="fr" ${protocol.language === 'fr' ? 'selected' : ''}>🇫🇷 Français</option>
+                <option value="zh" ${protocol.language === 'zh' ? 'selected' : ''}>🇨🇳 中文</option>
+            </select>
+            <select id="select-translation-language" class="select-tiny" title="E149: Целевой язык перевода">
+                <option value="">— без перевода —</option>
+                <option value="en" ${protocol.translation_language === 'en' ? 'selected' : ''}>🌍 → EN</option>
+                <option value="ru" ${protocol.translation_language === 'ru' ? 'selected' : ''}>🌍 → RU</option>
+                <option value="de" ${protocol.translation_language === 'de' ? 'selected' : ''}>🌍 → DE</option>
+                <option value="es" ${protocol.translation_language === 'es' ? 'selected' : ''}>🌍 → ES</option>
+                <option value="fr" ${protocol.translation_language === 'fr' ? 'selected' : ''}>🌍 → FR</option>
+            </select>
+            <button class="btn" id="btn-translate"><i class="fa-solid fa-language"></i> 🌐 Перевести</button>
+            <span class="text-muted" id="transcript-counter">${utterances.length} реплик · ${speakers.length} ораторов</span>
         </div>
         <div class="transcript-list">
-            ${utterances.map(u => renderUtteranceItem(u, speakers)).join('')}
+            ${utterances.map(u => renderUtteranceItem(u, speakers, null, decisionIds)).join('')}
         </div>
     `;
+
+    // E146: Привязываем обработчик пометки решения
+    const wireDecisionButtons = () => {
+        panel.querySelectorAll('.btn-mark-decision').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const utteranceId = btn.dataset.utteranceId;
+                const utterance = utterances.find(u => u.id === utteranceId);
+                if (!utterance) return;
+
+                try {
+                    btn.disabled = true;
+                    const decision = await api.createDecision({
+                        protocol_id: protocol.id,
+                        text: utterance.text || '',
+                        source_utterance_id: utterance.id,
+                        priority: 'medium',
+                        source: 'transcript',
+                    });
+                    // Обновить UI без перерисовки
+                    btn.outerHTML = `<button class="btn-tiny btn-decision-marked" data-utterance-id="${utteranceId}" title="Снять пометку решения">⚖️</button>`;
+                    btn.parentElement?.parentElement?.parentElement?.classList.add('is-decision');
+                    const item = btn.closest('.utterance-item');
+                    if (item) {
+                        item.classList.add('is-decision');
+                        // Найти .utterance-text и добавить ⚖️
+                        const textEl = item.querySelector('.utterance-text');
+                        if (textEl && !textEl.querySelector('.decision-mark')) {
+                            textEl.insertAdjacentHTML(
+                                'beforeend',
+                                ' <span class="decision-mark" title="Решение">⚖️</span>'
+                            );
+                        }
+                    }
+                    wireDecisionButtons();
+                    toast.success('Помечено как решение');
+                } catch (err) {
+                    toast.error(`Не удалось: ${err.message || err}`);
+                    btn.disabled = false;
+                }
+            });
+        });
+
+        panel.querySelectorAll('.btn-decision-marked').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const utteranceId = btn.dataset.utteranceId;
+                try {
+                    btn.disabled = true;
+                    // Найти decision_id по utterance_id
+                    const decisions = await api.listDecisions(protocol.id);
+                    const decision = decisions.find(d => d.source_utterance_id === utteranceId);
+                    if (decision) {
+                        await api.deleteDecision(decision.id);
+                    }
+                    btn.outerHTML = `<button class="btn-tiny btn-mark-decision" data-utterance-id="${utteranceId}" title="Пометить как решение">＋ ⚖️</button>`;
+                    const item = btn.closest('.utterance-item');
+                    if (item) {
+                        item.classList.remove('is-decision');
+                        const mark = item.querySelector('.decision-mark');
+                        if (mark) mark.remove();
+                    }
+                    wireDecisionButtons();
+                    toast.info('Пометка снята');
+                } catch (err) {
+                    toast.error(`Не удалось: ${err.message || err}`);
+                    btn.disabled = false;
+                }
+            });
+        });
+    };
+
+    wireDecisionButtons();
+
+    // E154: Inline-edit + grammar/spelling check
+    const wireGrammarAndEditButtons = () => {
+        // Edit button: заменяет текст на textarea
+        panel.querySelectorAll('.btn-edit-utterance').forEach(btn => {
+            if (btn._wired) return;
+            btn._wired = true;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const utteranceId = btn.dataset.utteranceId;
+                const item = panel.querySelector(`[data-id="${utteranceId}"]`);
+                const textEl = item?.querySelector('.utterance-text');
+                if (!item || !textEl) return;
+                const originalText = textEl.dataset.original || textEl.textContent.trim();
+
+                // Создаём textarea
+                const editor = document.createElement('textarea');
+                editor.className = 'utterance-editor';
+                editor.value = originalText;
+                editor.rows = Math.max(2, Math.ceil(originalText.length / 60));
+
+                const saveBtn = document.createElement('button');
+                saveBtn.className = 'btn-tiny btn-save-utterance';
+                saveBtn.textContent = '💾 Сохранить';
+                saveBtn.dataset.utteranceId = utteranceId;
+
+                const cancelBtn = document.createElement('button');
+                cancelBtn.className = 'btn-tiny btn-cancel-edit';
+                cancelBtn.textContent = '✕ Отмена';
+
+                textEl.style.display = 'none';
+                textEl.after(editor);
+                editor.after(saveBtn, cancelBtn);
+                editor.focus();
+
+                const cleanup = () => {
+                    editor.remove();
+                    saveBtn.remove();
+                    cancelBtn.remove();
+                    textEl.style.display = '';
+                };
+
+                cancelBtn.addEventListener('click', cleanup);
+
+                saveBtn.addEventListener('click', async () => {
+                    const newText = editor.value.trim();
+                    if (!newText || newText === originalText) {
+                        cleanup();
+                        return;
+                    }
+                    try {
+                        saveBtn.disabled = true;
+                        saveBtn.textContent = '⏳ Сохранение...';
+                        await api.updateUtteranceText(utteranceId, {
+                            text: newText,
+                            version_snapshot: true,
+                        });
+                        const u = utterances.find(x => x.id === utteranceId);
+                        if (u) {
+                            u.text = newText;
+                            textEl.textContent = newText;
+                            textEl.dataset.original = newText;
+                        }
+                        toast.success('Редактировано');
+                        cleanup();
+                    } catch (err) {
+                        toast.error(`Ошибка сохранения: ${err.message || err}`);
+                        saveBtn.disabled = false;
+                        saveBtn.textContent = '💾 Сохранить';
+                    }
+                });
+
+                // Ctrl+Enter — сохранить, Escape — отмена
+                editor.addEventListener('keydown', (ev) => {
+                    if (ev.ctrlKey && ev.key === 'Enter') {
+                        ev.preventDefault();
+                        saveBtn.click();
+                    } else if (ev.key === 'Escape') {
+                        ev.preventDefault();
+                        cleanup();
+                    }
+                });
+            });
+        });
+
+        // Check grammar button
+        panel.querySelectorAll('.btn-check-grammar').forEach(btn => {
+            if (btn._wired) return;
+            btn._wired = true;
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const utteranceId = btn.dataset.utteranceId;
+                const u = utterances.find(x => x.id === utteranceId);
+                if (!u) return;
+                const btnText = btn.innerHTML;
+                try {
+                    btn.disabled = true;
+                    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                    const result = await api.checkGrammar({
+                        text: u.text,
+                        language: (protocol.language || 'ru').substring(0, 2),
+                        utterance_id: utteranceId,
+                    });
+
+                    if (!result || !result.issues || result.issues.length === 0) {
+                        toast.success('Ошибок не найдено');
+                        return;
+                    }
+
+                    u._grammar_issues = result.issues;
+                    u._grammar_corrected = result.corrected;
+                    u._has_issues = true;
+
+                    const item = panel.querySelector(`[data-id="${utteranceId}"]`);
+                    if (item) {
+                        const oldIssues = item.querySelector('.grammar-issues');
+                        if (oldIssues) oldIssues.remove();
+
+                        const issuesHTML = `
+                            <div class="grammar-issues">
+                                <span class="grammar-issues-count">Найдено: ${result.issues.length}</span>
+                                ${result.issues.slice(0, 5).map(i => `
+                                    <div class="grammar-issue">
+                                        <span class="grammar-issue-rule">[${escapeHtml(i.rule_id)}]</span>
+                                        <span class="grammar-issue-original">${escapeHtml(i.original)}</span>
+                                        →
+                                        <span class="grammar-issue-suggestion">${escapeHtml(i.suggestion)}</span>
+                                        <div class="grammar-issue-desc text-muted">${escapeHtml(i.description)}</div>
+                                    </div>
+                                `).join('')}
+                                ${result.issues.length > 5 ? `<div class="grammar-issue text-muted">...и ещё ${result.issues.length - 5}</div>` : ''}
+                                <button class="btn-tiny btn-apply-corrections" data-utterance-id="${utteranceId}">✏️ Применить все исправления</button>
+                            </div>
+                        `;
+                        const textEl = item.querySelector('.utterance-text');
+                        if (textEl) textEl.insertAdjacentHTML('afterend', issuesHTML);
+                        item.classList.add('has-issues');
+                    }
+
+                    wireGrammarAndEditButtons();
+                    toast.info(`Найдено ${result.issues.length} проблем`);
+                } catch (err) {
+                    toast.error(`Ошибка проверки: ${err.message || err}`);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = btnText;
+                }
+            });
+        });
+
+        // Apply corrections button
+        panel.querySelectorAll('.btn-apply-corrections').forEach(btn => {
+            if (btn._wired) return;
+            btn._wired = true;
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const utteranceId = btn.dataset.utteranceId;
+                const u = utterances.find(x => x.id === utteranceId);
+                if (!u || !u._grammar_corrected) return;
+                const newText = u._grammar_corrected;
+
+                try {
+                    btn.disabled = true;
+                    btn.textContent = '⏳ Применение...';
+                    await api.updateUtteranceText(utteranceId, {
+                        text: newText,
+                        version_snapshot: true,
+                    });
+                    u.text = newText;
+                    delete u._grammar_issues;
+                    delete u._grammar_corrected;
+                    u._has_issues = false;
+
+                    const item = panel.querySelector(`[data-id="${utteranceId}"]`);
+                    if (item) {
+                        const textEl = item.querySelector('.utterance-text');
+                        if (textEl) {
+                            textEl.textContent = newText;
+                            textEl.dataset.original = newText;
+                        }
+                        const issues = item.querySelector('.grammar-issues');
+                        if (issues) issues.remove();
+                        item.classList.remove('has-issues');
+                    }
+                    toast.success('Исправления применены');
+                } catch (err) {
+                    toast.error(`Ошибка: ${err.message || err}`);
+                    btn.disabled = false;
+                    btn.textContent = '✏️ Применить все исправления';
+                }
+            });
+        });
+    };
+
+    wireGrammarAndEditButtons();
+
+    // E150: Кнопки Pause / Resume для транскрибации
+    const btnPause = panel.querySelector('#btn-pause-transcription');
+    const btnResume = panel.querySelector('#btn-resume-transcription');
+
+    if (btnPause && currentTranscriptionTaskId) {
+        btnPause.addEventListener('click', async () => {
+            const btnText = btnPause.innerHTML;
+            try {
+                btnPause.disabled = true;
+                btnPause.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ...';
+                const result = await api.pauseTranscription(currentTranscriptionTaskId);
+                toast.info(result.message || 'Транскрипция поставлена на паузу');
+                btnPause.style.display = 'none';
+                if (btnResume) btnResume.style.display = '';
+                // Останавливаем polling (новый статус обработается через checkExistingTranscription)
+                if (transcriptionPollInterval) {
+                    clearInterval(transcriptionPollInterval);
+                    transcriptionPollInterval = null;
+                }
+            } catch (err) {
+                toast.error(`Не удалось поставить на паузу: ${err.message || err}`);
+                btnPause.disabled = false;
+                btnPause.innerHTML = btnText;
+            }
+        });
+    }
+
+    if (btnResume) {
+        btnResume.addEventListener('click', async () => {
+            if (!currentTranscriptionTaskId) return;
+            const btnText = btnResume.innerHTML;
+            try {
+                btnResume.disabled = true;
+                btnResume.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Возобновление...';
+                const result = await api.resumeTranscription(currentTranscriptionTaskId);
+                toast.success(result.message || 'Транскрибция возобновлена');
+                btnResume.style.display = 'none';
+                if (btnPause) btnPause.style.display = '';
+                // E150: рестарт polling — UI увидит прогресс как новый запуск
+                startProgressPolling(protocol, currentTranscriptionTaskId);
+            } catch (err) {
+                toast.error(`Не удалось возобновить: ${err.message || err}`);
+                btnResume.disabled = false;
+                btnResume.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E148: Смена языка совещания
+    const selectLang = panel.querySelector('#select-protocol-language');
+    if (selectLang) {
+        selectLang.addEventListener('change', async () => {
+            try {
+                await api.updateProtocol(protocol.id, {
+                    language: selectLang.value,
+                });
+                protocol.language = selectLang.value;
+                toast.success(`Язык совещания: ${selectLang.value}`);
+            } catch (e) {
+                toast.error(`Не удалось: ${e.message || e}`);
+                selectLang.value = protocol.language || 'ru';
+            }
+        });
+    }
+
+    // E149: Смена целевого языка перевода
+    const selectTrans = panel.querySelector('#select-translation-language');
+    if (selectTrans) {
+        selectTrans.addEventListener('change', async () => {
+            try {
+                await api.updateProtocol(protocol.id, {
+                    translation_language: selectTrans.value || null,
+                });
+                protocol.translation_language = selectTrans.value || null;
+                if (selectTrans.value) {
+                    toast.info(`Целевой язык: ${selectTrans.value}. Нажмите "Перевести".`);
+                }
+            } catch (e) {
+                toast.error(`Не удалось: ${e.message || e}`);
+            }
+        });
+    }
+
+    // E149: Кнопка "Перевести"
+    const btnTrans = panel.querySelector('#btn-translate');
+    if (btnTrans) {
+        btnTrans.addEventListener('click', async () => {
+            const targetLang = protocol.translation_language || selectTrans?.value;
+            if (!targetLang) {
+                toast.warning('Сначала выберите целевой язык перевода');
+                return;
+            }
+            const btnText = btnTrans.innerHTML;
+            try {
+                btnTrans.disabled = true;
+                btnTrans.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Перевожу...';
+                toast.info(`Перевожу на ${targetLang}...`);
+
+                const result = await api.translateUtterances({
+                    protocol_id: protocol.id,
+                    target_language: targetLang,
+                });
+
+                if (!result || !result.translations || !result.translations.length) {
+                    toast.warning('Нет реплик для перевода');
+                    return;
+                }
+
+                toast.success(`Переведено ${result.translations.length} реплик (новых: ${result.new}, из кэша: ${result.cached})`);
+
+                // Update utterances in-memory
+                const transMap = new Map(result.translations.map(t => [t.id, t]));
+                for (let i = 0; i < utterances.length; i++) {
+                    const trans = transMap.get(utterances[i].id);
+                    if (trans) {
+                        utterances[i].translation_text = trans.translation_text;
+                        utterances[i].translation_language = trans.translation_language;
+                    }
+                }
+
+                // Update DOM append-only (no full re-render)
+                for (const [id, trans] of transMap) {
+                    const item = panel.querySelector(`[data-id="${id}"]`);
+                    if (item && !item.querySelector('.utterance-translation')) {
+                        const textEl = item.querySelector('.utterance-text');
+                        if (textEl) {
+                            const transEl = document.createElement('div');
+                            transEl.className = 'utterance-translation';
+                            transEl.innerHTML = `<i class="fa-solid fa-language"></i> <span class="translation-label">${escapeHtml(trans.translation_language)}:</span> ${escapeHtml(trans.translation_text)}`;
+                            textEl.after(transEl);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Translate failed:', err);
+                toast.error(`Перевод не удался: ${err.message || err}`);
+            } finally {
+                btnTrans.disabled = false;
+                btnTrans.innerHTML = btnText;
+            }
+        });
+    }
+
+    // Обработчик кликов на timestamp (jump to moment in audio)
+    panel.querySelectorAll('.timestamp').forEach(ts => {
+        ts.addEventListener('click', () => {
+            const sec = parseFloat(ts.dataset.time);
+            if (window.audioPlayer && window.audioPlayer.seekTo) {
+                window.audioPlayer.seekTo(sec);
+                toast.info(`Перемотано на ${formatTimestamp(sec)}`);
+            } else {
+                // Fallback: dispatch event
+                window.dispatchEvent(new CustomEvent('audio-seek', { detail: { sec } }));
+            }
+        });
+    });
+
     // Двойной клик → редактирование (заглушка)
     panel.querySelectorAll('.utterance-item').forEach(item => {
         item.addEventListener('dblclick', () => {
-            toast.info('Редактирование реплик -- следующая итерация');
+            toast.info('Редактирование реплик — следующая итерация');
         });
     });
+
+    // E140: Кнопка "Исправить через AI" (E142: учитывает speaker_id)
+    const btnCleanup = panel.querySelector('#btn-cleanup-ai');
+    if (btnCleanup) {
+        btnCleanup.addEventListener('click', async () => {
+            if (!utterances.length) {
+                toast.warning('Нет реплик для улучшения');
+                return;
+            }
+            const btnText = btnCleanup.innerHTML;
+            try {
+                btnCleanup.disabled = true;
+                btnCleanup.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Обработка...';
+                toast.info('Запускаю AI-улучшение текста...');
+
+                // E142: Группируем по speaker_id, чтобы AI не склеивал
+                // фразы разных спикеров.
+                // utterance.speaker_id === null → treat as 'unknown' group
+                const groups = [];
+                for (const u of utterances) {
+                    const speakerKey = u.speaker_id || 'unknown';
+                    const text = (u.text || '').trim();
+                    if (!text) continue;
+                    const last = groups[groups.length - 1];
+                    if (last && last.speakerKey === speakerKey) {
+                        // тот же спикер → склеиваем через пробел
+                        last.text += ' ' + text;
+                    } else {
+                        groups.push({ speakerKey, text });
+                    }
+                }
+
+                const fullText = groups.map(g => g.text).join(' ');
+
+                // E148: берём язык протокола, fallback на "ru"
+                const protocolLang = (protocol.language || 'ru').substring(0, 2);
+
+                const result = await api.cleanupText({
+                    text: fullText,
+                    language: protocolLang,
+                    operations: ['punctuation', 'spelling', 'formatting'],
+                });
+
+                if (result && result.text) {
+                    // E142: Распределяем улучшенный текст обратно по utterance,
+                    // но НЕ склеивая разных спикеров.
+                    const sentences = result.text.split(/(?<=[.!?])\s+/);
+                    let idx = 0;
+                    for (let i = 0; i < utterances.length && idx < sentences.length; i++) {
+                        const origSpeakerKey = utterances[i].speaker_id || 'unknown';
+                        // Собираем все предложения относящиеся к этому speaker turn
+                        let combined = '';
+                        while (idx < sentences.length) {
+                            combined += (combined ? ' ' : '') + sentences[idx++];
+                            // Заканчиваем когда меняется speaker turn
+                            if (i + 1 < utterances.length &&
+                                (utterances[i + 1].speaker_id || 'unknown') !== origSpeakerKey) {
+                                break;
+                            }
+                        }
+                        utterances[i].text = combined.trim() || utterances[i].text;
+                    }
+                    // Перерисовать список
+                    const list = panel.querySelector('.transcript-list');
+                    if (list) {
+                        list.innerHTML = utterances
+                            .map(u => renderUtteranceItem(u, speakers))
+                            .join('');
+                        // Перепривязываем dblclick
+                        panel.querySelectorAll('.utterance-item').forEach(item => {
+                            item.addEventListener('dblclick', () => {
+                                toast.info('Редактирование реплик — следующая итерация');
+                            });
+                        });
+                    }
+                    toast.success(`AI-улучшение применено к ${result.text.length} символам`);
+                } else {
+                    toast.warning('AI вернул пустой результат');
+                }
+            } catch (err) {
+                console.warn('AI cleanup failed:', err);
+                toast.error(`AI-улучшение не удалось: ${err.message || 'unknown'}`);
+            } finally {
+                btnCleanup.disabled = false;
+                btnCleanup.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E141: Кнопка "Запустить диаризацию"
+    const btnDiarize = panel.querySelector('#btn-diarize');
+    if (btnDiarize) {
+        btnDiarize.addEventListener('click', async () => {
+            const btnText = btnDiarize.innerHTML;
+            try {
+                btnDiarize.disabled = true;
+                btnDiarize.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Диаризация...';
+                toast.info('Запускаю диаризацию (определение спикеров)...');
+                const result = await api.startDiarization({ protocol_id: protocol.id });
+                // Запустить polling статуса (упрощённый вариант)
+                const checkStatus = async () => {
+                    try {
+                        const r = await api.getDiarizationResult(protocol.id);
+                        if (r && r.num_speakers_detected > 0) {
+                            toast.success(`Диаризация завершена: ${r.num_speakers_detected} спикеров`);
+                            // Перезагрузить страницу чтобы отобразить спикеров
+                            window.location.reload();
+                            return;
+                        }
+                    } catch (e) { /* not ready yet */ }
+                    setTimeout(checkStatus, 2000);
+                };
+                checkStatus();
+            } catch (err) {
+                toast.error(`Диаризация не удалась: ${err.message}`);
+            } finally {
+                btnDiarize.disabled = false;
+                btnDiarize.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E147: Кнопка "🤖 Найти решения" — AI auto-extract
+    // Ручная пометка (E146) продолжает работать независимо.
+    const btnExtract = panel.querySelector('#btn-extract-decisions');
+    if (btnExtract) {
+        btnExtract.addEventListener('click', async () => {
+            const btnText = btnExtract.innerHTML;
+            try {
+                btnExtract.disabled = true;
+                btnExtract.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Ищу решения...';
+                toast.info('Запускаю AI-поиск решений...');
+
+                const result = await api.extractDecisions({
+                    protocol_id: protocol.id,
+                    min_confidence: 0.5,
+                });
+
+                if (!result || !result.decisions || !result.decisions.length) {
+                    toast.warning('AI не нашёл решений');
+                    return;
+                }
+
+                toast.info(`AI нашёл ${result.total_found} решений, сохраняю...`);
+
+                // Сохраняем каждое решение через /decisions (с timestamp_sec, source_utterance_id)
+                let saved = 0;
+                for (const d of result.decisions) {
+                    try {
+                        // E147: проверяем — не дубликат ли (уже есть такой же source_utterance_id)
+                        if (d.source_utterance_id) {
+                            const existing = await api.listDecisions(protocol.id);
+                            if (existing.some(x => x.source_utterance_id === d.source_utterance_id)) {
+                                continue; // пропускаем — уже есть
+                            }
+                        }
+
+                        await api.createDecision({
+                            protocol_id: protocol.id,
+                            text: d.text,
+                            source_utterance_id: d.source_utterance_id,
+                            timestamp_sec: d.timestamp_sec,
+                            priority: d.priority || 'medium',
+                            source: 'transcript',
+                            decided_by: 'AI (авто)',
+                        });
+                        saved += 1;
+                    } catch (e) {
+                        console.warn('Failed to save decision:', e);
+                    }
+                }
+
+                // E147: обновляем UI без перерисовки
+                // 1. Загружаем актуальные decisions чтобы получить новые id
+                const updatedDecisions = await api.listDecisions(protocol.id);
+                decisionIds = new Set(updatedDecisions
+                    .filter(dd => dd.source_utterance_id)
+                    .map(dd => dd.source_utterance_id));
+
+                // 2. Подсвечиваем каждую utterance
+                for (const dec of updatedDecisions) {
+                    if (dec.source_utterance_id) {
+                        const item = panel.querySelector(`[data-id="${dec.source_utterance_id}"]`);
+                        if (item) {
+                            item.classList.add('is-decision');
+                            const textEl = item.querySelector('.utterance-text');
+                            if (textEl && !textEl.querySelector('.decision-mark')) {
+                                textEl.insertAdjacentHTML(
+                                    'beforeend',
+                                    ` <span class="decision-mark" title="AI: ${dec.rationale || 'решение'}">⚖️</span>`
+                                );
+                            }
+                            // Меняем кнопку на помеченную
+                            const btn = item.querySelector('.btn-mark-decision');
+                            if (btn) {
+                                btn.outerHTML = `<button class="btn-tiny btn-decision-marked" data-utterance-id="${dec.source_utterance_id}" title="Снять">⚖️</button>`;
+                            }
+                        }
+                    }
+                }
+
+                // 3. Перепривязываем обработчики
+                wireDecisionButtons();
+
+                toast.success(`AI добавил ${saved} решений${result.total_found > saved ? ` (${result.total_found - saved} были дубликатами)` : ''}`);
+            } catch (err) {
+                console.warn('AI extract failed:', err);
+                toast.error(`AI-поиск не удался: ${err.message || err}`);
+            } finally {
+                btnExtract.disabled = false;
+                btnExtract.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E154: Batch check grammar — все реплики
+    const btnCheckAll = panel.querySelector('#btn-check-all-grammar');
+    if (btnCheckAll) {
+        btnCheckAll.addEventListener('click', async () => {
+            const btnText = btnCheckAll.innerHTML;
+            try {
+                btnCheckAll.disabled = true;
+                btnCheckAll.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Проверка...';
+                toast.info('Проверяю грамматику всех реплик...');
+
+                let totalIssues = 0;
+                let totalUtterancesWithIssues = 0;
+                const lang = (protocol.language || 'ru').substring(0, 2);
+                const batchSize = 10;
+                const itemsToCheck = utterances.slice(0, 200);  // лимит для производительности
+
+                for (let i = 0; i < itemsToCheck.length; i += batchSize) {
+                    const batch = itemsToCheck.slice(i, i + batchSize);
+                    const results = await Promise.allSettled(
+                        batch.map(u => api.checkGrammar({
+                            text: u.text,
+                            language: lang,
+                            utterance_id: u.id,
+                        }))
+                    );
+                    for (let j = 0; j < batch.length; j++) {
+                        const r = results[j];
+                        if (r.status === 'fulfilled' && r.value && r.value.issues) {
+                            const u = batch[j];
+                            u._grammar_issues = r.value.issues;
+                            u._grammar_corrected = r.value.corrected;
+                            if (r.value.issues.length > 0) {
+                                totalIssues += r.value.issues.length;
+                                totalUtterancesWithIssues += 1;
+                                u._has_issues = true;
+                                // Append-only DOM update
+                                const item = panel.querySelector(`[data-id="${u.id}"]`);
+                                if (item) {
+                                    const oldIssues = item.querySelector('.grammar-issues');
+                                    if (oldIssues) oldIssues.remove();
+                                    const issuesHTML = `
+                                        <div class="grammar-issues">
+                                            <span class="grammar-issues-count">Найдено: ${r.value.issues.length}</span>
+                                            ${r.value.issues.slice(0, 3).map(issue => `
+                                                <div class="grammar-issue">
+                                                    <span class="grammar-issue-rule">[${escapeHtml(issue.rule_id)}]</span>
+                                                    <span class="grammar-issue-original">${escapeHtml(issue.original)}</span> →
+                                                    <span class="grammar-issue-suggestion">${escapeHtml(issue.suggestion)}</span>
+                                                </div>
+                                            `).join('')}
+                                            ${r.value.issues.length > 3 ? `<div class="grammar-issue text-muted">...и ещё ${r.value.issues.length - 3}</div>` : ''}
+                                            <button class="btn-tiny btn-apply-corrections" data-utterance-id="${u.id}">✏️ Применить</button>
+                                        </div>
+                                    `;
+                                    const textEl = item.querySelector('.utterance-text');
+                                    if (textEl) textEl.insertAdjacentHTML('afterend', issuesHTML);
+                                    item.classList.add('has-issues');
+                                }
+                            }
+                        }
+                    }
+                }
+
+                wireGrammarAndEditButtons();
+
+                const btnApplyAll = panel.querySelector('#btn-apply-all-corrections');
+                if (totalUtterancesWithIssues > 0 && btnApplyAll) {
+                    btnApplyAll.style.display = '';
+                    btnApplyAll.textContent = `✏️ Применить всё (${totalUtterancesWithIssues} реплик)`;
+                }
+
+                toast.success(`Найдено ${totalIssues} проблем в ${totalUtterancesWithIssues} репликах`);
+            } catch (err) {
+                console.error('Batch check failed:', err);
+                toast.error(`Ошибка: ${err.message || err}`);
+            } finally {
+                btnCheckAll.disabled = false;
+                btnCheckAll.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E154: Apply all corrections — применить все исправления разом
+    const btnApplyAll = panel.querySelector('#btn-apply-all-corrections');
+    if (btnApplyAll) {
+        btnApplyAll.addEventListener('click', async () => {
+            const items = utterances.filter(u => u._grammar_corrected && u._has_issues);
+            if (!items.length) {
+                toast.warning('Нет реплик с исправлениями');
+                return;
+            }
+            const btnText = btnApplyAll.innerHTML;
+            try {
+                btnApplyAll.disabled = true;
+                btnApplyAll.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Применяю...';
+                toast.info(`Применяю исправления к ${items.length} репликам...`);
+
+                let applied = 0;
+                for (const u of items) {
+                    try {
+                        await api.updateUtteranceText(u.id, {
+                            text: u._grammar_corrected,
+                            version_snapshot: true,
+                        });
+                        u.text = u._grammar_corrected;
+                        delete u._grammar_issues;
+                        delete u._grammar_corrected;
+                        u._has_issues = false;
+
+                        const item = panel.querySelector(`[data-id="${u.id}"]`);
+                        if (item) {
+                            const textEl = item.querySelector('.utterance-text');
+                            if (textEl) {
+                                textEl.textContent = u.text;
+                                textEl.dataset.original = u.text;
+                            }
+                            const issues = item.querySelector('.grammar-issues');
+                            if (issues) issues.remove();
+                            item.classList.remove('has-issues');
+                        }
+                        applied++;
+                    } catch (e) {
+                        console.warn('Failed to apply correction:', u.id, e);
+                    }
+                }
+
+                btnApplyAll.style.display = 'none';
+                toast.success(`Применено ${applied}/${items.length} исправлений`);
+            } catch (err) {
+                toast.error(`Ошибка: ${err.message || err}`);
+            } finally {
+                btnApplyAll.disabled = false;
+                btnApplyAll.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E141: Сразу загружаем speakers, нужно для отображения диаризации
+    if (!speakers || !speakers.length) {
+        try {
+            speakers = await api.listSpeakers(protocol.id);
+            // Перерисовать список если speakers изменились
+            const list = panel.querySelector('.transcript-list');
+            if (list && utterances.length) {
+                list.innerHTML = utterances
+                    .map(u => renderUtteranceItem(u, speakers))
+                    .join('');
+            }
+        } catch (e) {
+            console.warn('Failed to load speakers:', e);
+        }
+    }
 
     // Обработчик кнопки "Транскрибировать" в empty-state
     const emptyState = panel.querySelector('empty-state');
@@ -298,24 +1150,89 @@ function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
     }
 }
 
-function renderUtteranceItem(u, speakers) {
-    const speaker = speakers.find(s => s.id === u.speaker_id);
-    const speakerName = speaker?.display_name || u.speaker_label || '--';
-    const speakerColor = speaker?.color || '#888';
+function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds = null) {
+    // E144: три источника speaker для badges:
+    // 1. u.speaker_label — денормализован из бэкенда (если был join)
+    // 2. speakers.find(s => s.id === u.speaker_id) — из списка speakers
+    // 3. fallbackSpeakers — если loadSpeakers пришёл позже и не совпадает со старым render
+    let speaker = null;
+    if (u.speaker_label) {
+        // u.speaker_label есть (например "Speaker 1") — найдём по нему
+        speaker = speakers.find(s => s.display_name === u.speaker_label)
+            || speakers.find(s => s.speaker_label === u.speaker_label)
+            || fallbackSpeakers?.find(s => s.display_name === u.speaker_label);
+    }
+    if (!speaker && u.speaker_id) {
+        speaker = speakers.find(s => s.id === u.speaker_id)
+            || fallbackSpeakers?.find(s => s.id === u.speaker_id);
+    }
+
+    // E144: Если speaker_id пришёл из БД, но объект Speaker не нашёлся —
+    // создаём виртуальный "Speaker N" с цветом по хэшу id
+    let speakerName, speakerColor;
+    if (speaker) {
+        speakerName = speaker.display_name || speaker.speaker_label || u.speaker_label || 'Speaker ?';
+        speakerColor = speaker.color || '#888';
+    } else if (u.speaker_id || u.speaker_label) {
+        // Виртуальный speaker — отображаем badge по имеющимся данным
+        speakerName = u.speaker_label || 'Speaker ?';
+        const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+        let hash = 0;
+        const idStr = String(u.speaker_id || u.speaker_label || '');
+        for (let i = 0; i < idStr.length; i++) {
+            hash = ((hash << 5) - hash) + idStr.charCodeAt(i);
+            hash |= 0;
+        }
+        speakerColor = colors[Math.abs(hash) % colors.length];
+    } else {
+        speakerName = '—';
+        speakerColor = '#888';
+    }
+
     const startTime = formatTimestamp(u.start_sec);
     const conf = u.confidence ?? 1.0;
     const confClass = conf < 0.4 ? 'danger' : conf < 0.7 ? 'warning' : 'success';
     const lowConfIcon = u.low_confidence ? ' <span title="Низкая уверенность" style="color:#f59e0b;">[?]</span>' : '';
+    const isDecision = decisionIds && decisionIds.has(u.id);
+    const decisionIcon = isDecision
+        ? '<span class="decision-mark" title="Решение">⚖️</span>'
+        : '';
+    const actionBtn = isDecision
+        ? `<button class="btn-tiny btn-decision-marked" data-utterance-id="${u.id}" title="Снять пометку решения">⚖️</button>`
+        : `<button class="btn-tiny btn-mark-decision" data-utterance-id="${u.id}" title="Пометить как решение">＋ ⚖️</button>`;
+    // E154: редактирование + проверка грамматики
+    const editBtn = `<button class="btn-tiny btn-edit-utterance" data-utterance-id="${u.id}" title="Редактировать"><i class="fa-regular fa-pen-to-square"></i></button>`;
+    const grammarBtn = `<button class="btn-tiny btn-check-grammar" data-utterance-id="${u.id}" title="Проверить орфографию/грамматику">🔍</button>`;
+    // E149: отображение перевода (если есть)
+    const translationBlock = u.translation_text
+        ? `<div class="utterance-translation"><i class="fa-solid fa-language"></i> <span class="translation-label">${escapeHtml(u.translation_language || '?')}:</span> ${escapeHtml(u.translation_text)}</div>`
+        : '';
+    // E154: блок issues (если есть после проверки)
+    const issuesBlock = (u._grammar_issues && u._grammar_issues.length)
+        ? `<div class="grammar-issues">
+            <span class="grammar-issues-count">Найдено: ${u._grammar_issues.length}</span>
+            ${u._grammar_issues.slice(0, 3).map(i => `<div class="grammar-issue">${escapeHtml(i.description)}</div>`).join('')}
+            ${u._grammar_issues.length > 3 ? `<div class="grammar-issue text-muted">...и ещё ${u._grammar_issues.length - 3}</div>` : ''}
+            <button class="btn-tiny btn-apply-corrections" data-utterance-id="${u.id}">✏️ Применить исправления</button>
+        </div>`
+        : '';
     return `
-        <div class="utterance-item" data-id="${u.id}" tabindex="0">
+        <div class="utterance-item ${isDecision ? 'is-decision' : ''} ${u._has_issues ? 'has-issues' : ''}" data-id="${u.id}" tabindex="0">
             <div class="utterance-meta">
-                <span class="speaker-badge" style="background:${speakerColor};">${escapeHtml(speakerName)}</span>
+                <span class="speaker-badge" style="background:${speakerColor};" title="${escapeHtml(speakerName)}">${escapeHtml(speakerName)}</span>
                 <span class="timestamp" data-time="${u.start_sec}">${startTime}</span>
                 <span class="confidence-bar">
                     <span class="conf-fill conf-${confClass}" style="width:${conf * 100}%"></span>
                 </span>
+                <span class="utterance-actions">
+                    ${actionBtn}
+                    ${editBtn}
+                    ${grammarBtn}
+                </span>
             </div>
-            <div class="utterance-text">${escapeHtml(u.text)}${lowConfIcon}</div>
+            <div class="utterance-text" data-original="${escapeHtml(u.text)}">${escapeHtml(u.text)}${lowConfIcon}${decisionIcon}</div>
+            ${issuesBlock}
+            ${translationBlock}
         </div>
     `;
 }
@@ -373,9 +1290,78 @@ function renderScreenshotsTab(rootEl, protocol, screenshots) {
     }
 }
 
-function renderDecisionsTab(rootEl, protocol) {
+async function renderDecisionsTab(rootEl, protocol) {
     const panel = rootEl.querySelector('#panel-decisions');
-    panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-check"></i>" title="Список решений пуст" description="Решения можно добавлять после транскрипции." action-label="Добавить решение"></empty-state>`;
+    panel.innerHTML = `<div class="loading"><div class="spinner"></div> Загрузка решений...</div>`;
+
+    // E146: Загрузка решений из API
+    let decisions = [];
+    try {
+        const result = await api.listDecisions(protocol.id);
+        decisions = Array.isArray(result) ? result : [];
+    } catch (e) {
+        console.warn('Failed to load decisions:', e);
+        decisions = [];
+    }
+
+    if (!decisions.length) {
+        panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-check"></i>" title="Список решений пуст" description="Пометьте фразы в транскрипте как ⚖️ Решение. Каждое решение получит таймкод."></empty-state>`;
+        return;
+    }
+
+    panel.innerHTML = `
+        <div class="decisions-list">
+            ${decisions.sort((a, b) => (a.timestamp_sec ?? 0) - (b.timestamp_sec ?? 0)).map(d => `
+                <div class="decision-card" data-id="${d.id}" data-timestamp="${d.timestamp_sec ?? ''}" data-utterance-id="${d.source_utterance_id ?? ''}">
+                    <div class="decision-header">
+                        <span class="decision-timestamp" data-time="${d.timestamp_sec ?? ''}">
+                            <i class="fa-regular fa-clock"></i>
+                            ${formatTimestamp(d.timestamp_sec ?? 0)}
+                        </span>
+                        <span class="badge badge-${d.priority === 'high' ? 'danger' : d.priority === 'low' ? 'info' : 'warning'}">${d.priority || 'medium'}</span>
+                        <button class="btn-tiny btn-delete-decision" data-id="${d.id}" title="Удалить">
+                            <i class="fa-regular fa-trash-can"></i>
+                        </button>
+                    </div>
+                    <div class="decision-text">${escapeHtml(d.text || '')}</div>
+                    <div class="decision-meta">
+                        ${d.decided_by ? `<i class="fa-regular fa-user"></i> ${escapeHtml(d.decided_by)}` : ''}
+                        <span class="text-muted"><i class="fa-regular fa-calendar"></i> ${new Date(d.created_at).toLocaleString('ru-RU')}</span>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+
+    // E146: клик на timestamp → перемотка аудио
+    panel.querySelectorAll('.decision-timestamp').forEach(ts => {
+        ts.addEventListener('click', () => {
+            const sec = parseFloat(ts.dataset.time);
+            if (window.audioPlayer && window.audioPlayer.seekTo) {
+                window.audioPlayer.seekTo(sec);
+                toast.info(`Перемотано на ${formatTimestamp(sec)}`);
+            } else {
+                window.dispatchEvent(new CustomEvent('audio-seek', { detail: { sec } }));
+            }
+        });
+    });
+
+    // Удаление решения
+    panel.querySelectorAll('.btn-delete-decision').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            try {
+                await api.deleteDecision(id);
+                btn.closest('.decision-card').remove();
+                if (!panel.querySelector('.decision-card')) {
+                    panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-check"></i>" title="Список решений пуст"></empty-state>`;
+                }
+                toast.success('Решение удалено');
+            } catch (e) {
+                toast.error(`Не удалось: ${e.message || e}`);
+            }
+        });
+    });
 }
 
 function renderTasksTab(rootEl, protocol, actionItems) {
@@ -641,6 +1627,12 @@ function startProgressPolling(protocol, taskId) {
     // E134: максимальный start_sec, который уже отрисован
     let _lastRenderedSec = 0;
 
+    // E136: активируем вкладку транскрипта и убираем hidden
+    const transcriptTab = document.querySelector('[aria-controls="panel-transcript"]');
+    const transcriptPanel = document.getElementById('panel-transcript');
+    if (transcriptTab) transcriptTab.click();
+    if (transcriptPanel) transcriptPanel.removeAttribute('hidden');
+
     // Poll every 2 seconds
     transcriptionPollInterval = setInterval(async () => {
         try {
@@ -676,6 +1668,18 @@ function startProgressPolling(protocol, taskId) {
                 } catch (e) {
                     console.warn('Failed to fetch utterances:', e);
                 }
+            }
+
+            // E150: Detect paused status → switch Pause/Resume buttons
+            const btnPause = panel.querySelector('#btn-pause-transcription');
+            const btnResume = panel.querySelector('#btn-resume-transcription');
+            if (progress.status === 'paused') {
+                if (btnPause) btnPause.style.display = 'none';
+                if (btnResume) btnResume.style.display = '';
+                toast.warning('Транскрипция на паузе. Можно продолжить.');
+            } else if (['running', 'starting', 'queued'].includes(progress.status)) {
+                if (btnPause) btnPause.style.display = '';
+                if (btnResume) btnResume.style.display = 'none';
             }
 
             // Check if done
@@ -729,14 +1733,25 @@ function startProgressPolling(protocol, taskId) {
 }
 
 async function appendUtteranceItems(protocolId, items) {
-    """E133: append-only — добавляет новые реплики без перерисовки списка."""
+    // E133: append-only — добавляет новые реплики без перерисовки списка
+    // E137: items уже могут быть grouped на бэкенде или сырыми —
+    // на фронте мы их НЕ группируем, потому что speaker_id=null и
+    // временные паузы < 2 сек редко значат смену темы.
+    // Вместо этого показываем длинные сегменты с их start_sec и
+    // timestamp, чтобы было понятно где границы.
     const panel = document.getElementById('panel-transcript');
-    if (!panel || typeof renderUtteranceItem !== 'function') return;
+    if (!panel) {
+        console.warn('appendUtteranceItems: panel-transcript not found');
+        return;
+    }
+    if (typeof renderUtteranceItem !== 'function') {
+        console.warn('appendUtteranceItems: renderUtteranceItem not defined');
+        return;
+    }
 
     let list = panel.querySelector('.transcript-list');
     if (!list) {
         // Первая инициализация — создаём структуру
-        const toolbar = panel.querySelector('.transcript-toolbar');
         panel.innerHTML = `
             <div class="transcript-toolbar">
                 <span class="text-muted">0 реплик</span>
@@ -756,7 +1771,7 @@ async function appendUtteranceItems(protocolId, items) {
         list.insertAdjacentHTML('beforeend', html);
     }
 
-    // Обновляем счётчик в toolbar
+    // Обновляем счётчик в toolbar (E137: общее число реплик в DOM)
     const counter = panel.querySelector('.transcript-toolbar .text-muted');
     if (counter) {
         const total = list.children.length;

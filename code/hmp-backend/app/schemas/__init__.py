@@ -60,6 +60,12 @@ class ProtocolUpdate(BaseModel):
     location: str | None = Field(None, max_length=255)
     chair: str | None = Field(None, max_length=100)
     agenda: str | None = None
+    language: str | None = Field(
+        None, max_length=10, description="E148: язык совещания (ru, en, ...)"
+    )
+    translation_language: str | None = Field(
+        None, max_length=10, description="E149: целевой язык перевода"
+    )
 
 
 class AudioFileResponse(BaseModel):
@@ -88,6 +94,8 @@ class ProtocolResponse(BaseModel):
     duration_sec: int | None
     wer_quality: float | None
     status: str
+    language: str = "ru"  # E148
+    translation_language: str | None = None  # E149
     audio_file: AudioFileResponse | None
     created_at: datetime
     updated_at: datetime

@@ -847,3 +847,163 @@ setInterval(async () => {
     if (isTerminal(progress.status)) clearInterval(poller);
 }, POLL_INTERVAL_MS);
 ```
+
+## Endpoint: GET /api/v1/hmp/utterances (E133)
+
+### Дополнительный параметр: `after_sec`
+
+```
+GET /api/v1/hmp/utterances?protocol_id=X&after_sec=123.5&limit=500
+```
+
+Возвращает реплики с `start_sec > after_sec` для инкрементальной выборки (streaming).
+
+Схема ответа:
+```json
+{
+  "total": 280,
+  "skip": 0,
+  "limit": 500,
+  "items": [
+    {
+      "id": "uuid-u1",
+      "speaker_id": "uuid-s1",
+      "speaker_label": "Speaker 1",  ← денормализован для E144
+      "start_sec": 123.456,
+      "end_sec": 128.789,
+      "text": "...",
+      "confidence": 0.92
+    }
+  ]
+}
+```
+
+## Endpoint: POST /diarize/run (E141)
+
+Не stub! Реальная эвристическая диаризация:
+
+```
+POST /diarize/run
+{
+  "protocol_id": "uuid-X",
+  "min_speakers": 2,    ← optional
+  "max_speakers": 10    ← optional
+}
+```
+
+→ 202 Accepted → {task_id, protocol_id, status: "queued"}
+→ Через 2-3 сек: GET /diarize/result/{protocol_id} → {num_speakers_detected, segments_json}
+
+## Endpoint: POST /api/v1/hmp/ai/translate (E149)
+
+### Request
+
+```json
+{
+  "protocol_id": "uuid",
+  "target_language": "en",
+  "utterance_ids": ["uuid-u1", "uuid-u2"]  // optional, default = all
+}
+```
+
+### Response (200)
+
+```json
+{
+  "translations": [
+    {
+      "id": "uuid-u1",
+      "text": "Договорились использовать PostgreSQL.",
+      "translation_text": "[en] We agreed to use PostgreSQL.",
+      "translation_language": "en"
+    }
+  ],
+  "cached": 32,
+  "new": 0,
+  "total": 32,
+  "target_language": "en",
+  "provider": "mock"
+}
+```
+
+## Endpoint: POST /api/v1/hmp/ai/extract-decisions (E147)
+
+```json
+POST /api/v1/hmp/ai/extract-decisions
+{
+  "protocol_id": "uuid",
+  "text": null,                // null = загрузить из БД
+  "min_confidence": 0.5
+}
+
+→ {
+  "decisions": [
+    {
+      "text": "...",
+      "timestamp_sec": 235.5,
+      "source_utterance_id": "uuid-u1",
+      "confidence": 0.85,
+      "priority": "medium",
+      "rationale": "Ключевые слова: договорились, принято"
+    }
+  ],
+  "total_found": 5,
+  "provider": "mock"
+}
+```
+
+## Endpoint: PATCH /api/v1/hmp/protocols/{id} (E148)
+
+Расширение — добавляем поля `language` и `translation_language`.
+
+```json
+PATCH /api/v1/hmp/protocols/{id}
+{ "language": "en" }
+
+PATCH /api/v1/hmp/protocols/{id}
+{ "translation_language": "ru" }
+```
+
+## Endpoint: POST /transcribe/pause/{task_id} (E150)
+
+### Request
+
+```
+POST /api/v1/hmp/transcribe/pause/{task_id}
+```
+
+### Response (200)
+
+```json
+{
+  "task_id": "uuid-task",
+  "status": "paused",
+  "progress": 42.0,
+  "paused_at": "2026-09-23T21:23:25.123Z",
+  "can_resume": true,
+  "message": "Транскрипция поставлена на паузу"
+}
+```
+
+## Endpoint: POST /transcribe/resume/{task_id} (E150)
+
+### Response (200)
+
+```json
+{
+  "task_id": "uuid-task",
+  "status": "running",
+  "resume_from_sec": 235.5,
+  "previously_done_segments": 12,
+  "message": "Транскрипция возобновлена"
+}
+```
+
+## E153: Поведение POST /transcribe/run при повторном вызове
+
+Перед стартом BG-task:
+1. `DELETE FROM utterance WHERE protocol_id = ?`
+2. `DELETE FROM decision WHERE protocol_id = ?`
+3. Логируем `transcription_reset_completed`
+
+Это **гарантирует** что повторная транскрибация не дублирует данные.

@@ -1,10 +1,15 @@
 """Diarization endpoints (US-007 — API §4.6).
 
-Speaker diarization (pyannote.audio, ADR-005) groups utterances by voice.
-We expose:
-  - POST /diarize/run — start a diarization task (currently stub)
-  - GET  /diarize/result/{protocol_id} — fetch the latest DiarizationResult
+Speaker diarization (US-007) groups utterances by voice via heuristic (E141):
+- Без pyannote.audio, через паузы (PAUSE_THRESHOLD_SEC).
+- При паузе > 2 сек между utterance.start и предыдущим utterance.end
+  считаем что спикер сменился → создаём новый Speaker.
+
+Эндпоинты:
+  - POST /diarize/run — запуск (async, asyncio.create_task)
+  - GET  /diarize/result/{protocol_id} — результат из DiarizationResult
 """
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -20,6 +25,10 @@ from app.db.session import get_db
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+# E141: Registry активных задач (для отмены и мониторинга)
+_active_diarize_tasks: dict[uuid.UUID, asyncio.Task] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -99,16 +108,40 @@ async def run_diarization(
         num_speakers=body.num_speakers,
     )
 
+    # E141: Реальная диаризация вместо stub (эвристика по паузам)
     async def _runner() -> None:
-        # TODO: replace with real pyannote pipeline + DB write into DiarizationResult
-        logger.info(
-            "diarize_runner_stub",
-            task_id=str(task_id),
-            note="ML pipeline not wired up — placeholder run",
-        )
-        _diarize_tasks[task_id]["status"] = "completed"
+        try:
+            _diarize_tasks[task_id]["status"] = "running"
 
-    background_tasks.add_task(_runner)
+            from app.services.diarization import diarization_service
+
+            result = await diarization_service.diarize_protocol(
+                db=db,
+                protocol_id=body.protocol_id,
+                min_speakers=body.min_speakers,
+                max_speakers=body.max_speakers,
+            )
+
+            _diarize_tasks[task_id]["status"] = "completed"
+            _diarize_tasks[task_id]["result_id"] = str(result.id)
+            logger.info(
+                "diarize_runner_completed",
+                task_id=str(task_id),
+                num_speakers=result.num_speakers_detected,
+            )
+        except Exception as exc:
+            _diarize_tasks[task_id]["status"] = "failed"
+            _diarize_tasks[task_id]["error"] = str(exc)[:500]
+            logger.exception(
+                "diarize_runner_failed",
+                task_id=str(task_id),
+                error=str(exc),
+            )
+
+    # Сохраняем db для использования в _runner
+    # E141: asyncio.create_task вместо background_tasks (как в transcribe)
+    bg_task = asyncio.create_task(_runner())
+    _active_diarize_tasks[task_id] = bg_task  # регистрируем
 
     return DiarizeTaskAccepted(
         task_id=task_id,

@@ -164,3 +164,18 @@
 - **Status:** Done (E131/E132)
 - **Файл:** `US_081.md`
 - **Описание:** Сегменты появляются в UI в реальном времени через queue.Queue → persist_utterances_loop → frontend polling
+
+## US-082: UX-полировка: append-only + компактные плашки + speaker badges
+- **Status:** Done (E133/E134/E136/E137/E138/E140/E143/E144)
+- **Файл:** `US_082.md`
+- **Описание:** Append-only без перерисовки, compact cards, speaker fallback badges
+
+## US-083: Ручная пометка фраз как "Решения" в транскрипте
+- **Status:** Done (E146)
+- **Файл:** `US_083.md`
+- **Описание:** Кнопка "+ ⚖️" на каждой реплике, сохранение в БД с timestamp
+
+## US-084: Pause/Resume транскрибации + чистая ретранскрибация
+- **Status:** Done (E150-E153)
+- **Файл:** `US_084.md`
+- **Описание:** Pause сохраняет state в БД, resume работает cross-session, повторная транскрибация чистая

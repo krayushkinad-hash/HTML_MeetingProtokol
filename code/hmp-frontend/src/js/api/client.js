@@ -210,6 +210,9 @@ export const api = {
     summarize: (data) => request('POST', '/ai/summarize', { body: data }),
     cleanupText: (data) => request('POST', '/ai/cleanup-text', { body: data }),
     restorePunctuation: (data) => request('POST', '/ai/restore-punctuation', { body: data }),
+    // E141: Диаризация
+    startDiarization: (data) => request('POST', '/diarize/run', { body: data }),
+    getDiarizationResult: (protocolId) => request('GET', `/diarize/result/${protocolId}`),
     testBotConnection: (bot_token) => request('POST', '/bot/test-connection', { body: { bot_token } }),
 
     // === Export ===
@@ -254,4 +257,10 @@ export const api = {
     setActiveWhisperModel: (name) => request('POST', `/whisper/active/${name}`),
     getWhisperModelStatus: (name) => request('GET', `/whisper/status/${name}`),
     deleteWhisperModel: (name) => request('DELETE', `/whisper/models/${name}`),
-};
+};    // E147: AI auto-extract decisions
+    extractDecisions: (data) => request('POST', '/ai/extract-decisions', { body: data }),    // E149: AI translation
+    translateUtterances: (data) => request('POST', '/ai/translate', { body: data }),    // E150: Pause / Resume transcription
+    pauseTranscription: (taskId) => request('POST', `/transcribe/pause/${taskId}`),
+    resumeTranscription: (taskId) => request('POST', `/transcribe/resume/${taskId}`),    // E154: Grammar/spelling check
+    checkGrammar: (data) => request('POST', '/ai/check-grammar', { body: data }),
+    updateUtteranceText: (id, data) => request('PUT', `/utterances/${id}/text`, { body: data }),

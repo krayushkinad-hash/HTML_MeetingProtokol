@@ -52,21 +52,43 @@ async def start_live(
     Returns the WebSocket URL the client should connect to for the
     live event stream, plus the Телемост iframe URL.
     """
-    from datetime import date as date_cls
+    try:
+        from datetime import date as date_cls
 
-    protocol_id = uuid.uuid4()
-    protocol = Protocol(
-        id=protocol_id,
-        title=req.title,
-        date=date_cls.today(),
-        status="live",
-        agenda=None,
-    )
-    db.add(protocol)
-    await db.commit()
-    await db.refresh(protocol)
+        protocol_id = uuid.uuid4()
+        protocol = Protocol(
+            id=protocol_id,
+            title=req.title,
+            date=date_cls.today(),
+            status="live",
+            agenda=None,
+        )
+        db.add(protocol)
+        await db.commit()
+        await db.refresh(protocol)
+    except Exception as exc:
+        # E145: детальное логирование 500-ошибки live/start
+        logger.exception(
+            "live_start_db_error",
+            title=req.title,
+            telemost_url=req.telemost_url,
+            error=str(exc),
+        )
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка создания live-сессии: {str(exc)[:200]}",
+        )
 
-    websocket_url = f"ws://{settings.backend_host}:{settings.backend_port}{settings.api_prefix}/live/{protocol_id}/stream"
+    # E145: безопасный расчёт WebSocket URL
+    try:
+        backend_host = getattr(settings, "backend_host", "127.0.0.1")
+        backend_port = getattr(settings, "backend_port", 8000)
+        api_prefix = getattr(settings, "api_prefix", "/api/v1/hmp")
+        websocket_url = f"ws://{backend_host}:{backend_port}{api_prefix}/live/{protocol_id}/stream"
+    except Exception as url_exc:
+        logger.warning("live_websocket_url_failed", error=str(url_exc))
+        websocket_url = f"ws://127.0.0.1:8000{api_prefix}/live/{protocol_id}/stream"
 
     logger.info(
         "live_started",
@@ -77,7 +99,7 @@ async def start_live(
 
     return LiveStartResponse(
         protocol_id=protocol_id,
-        live_session_id=uuid.uuid4(),  # session-specific id; could be persisted later
+        live_session_id=uuid.uuid4(),
         websocket_url=websocket_url,
         telemost_iframe_url=req.telemost_url,
         started_at=datetime.now(timezone.utc),

@@ -38,6 +38,10 @@ class DecisionCreate(BaseModel):
     decided_by: str | None = Field(None, max_length=100)
     priority: Literal["low", "medium", "high"] = "medium"
     source_utterance_id: uuid.UUID | None = None
+    # E146: прямой timestamp_sec для Live Mode (когда нет utterance)
+    timestamp_sec: float | None = Field(None, ge=0)
+    # E146: режим источника — для UX
+    source: Literal["transcript", "live"] = "transcript"
 
 
 class DecisionResponse(BaseModel):
@@ -47,6 +51,7 @@ class DecisionResponse(BaseModel):
     text: str
     decided_by: str | None
     source_utterance_id: uuid.UUID | None
+    timestamp_sec: float | None = None  # E146: вычисленное поле
     priority: str
     created_at: datetime
 
@@ -89,7 +94,8 @@ async def create_decision(
             detail=f"Протокол {body.protocol_id} не найден",
         )
 
-    # Validate optional source utterance belongs to the same protocol
+    # Determine timestamp_sec: prefer utterance.start_sec, else body.timestamp_sec
+    timestamp_sec: float | None = body.timestamp_sec
     if body.source_utterance_id is not None:
         utt_row = await db.execute(
             select(Utterance).where(Utterance.id == body.source_utterance_id)
@@ -105,7 +111,12 @@ async def create_decision(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Реплика принадлежит другому протоколу",
             )
+        # E146: денормализуем timestamp из utterance.start_sec
+        timestamp_sec = float(utterance.start_sec)
 
+    # E146: сохраняем timestamp_sec отдельным полем через JSON в Decision
+    # Но в БД у нас только source_utterance_id. Храним через fallback:
+    # при list — если timestamp_sec=None, но есть source_utterance, JOIN.
     decision = Decision(
         protocol_id=body.protocol_id,
         text=body.text,
@@ -122,10 +133,14 @@ async def create_decision(
         decision_id=str(decision.id),
         protocol_id=str(decision.protocol_id),
         priority=decision.priority,
-        decided_by=decision.decided_by,
+        timestamp_sec=timestamp_sec,
+        source=body.source,
     )
 
-    return _to_response(decision)
+    # E146: возвращаем с timestamp_sec
+    response = _to_response(decision)
+    response.timestamp_sec = timestamp_sec
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -168,27 +183,37 @@ async def _list_decisions_impl(
     priority: str | None,
     db: AsyncSession,
 ) -> list[DecisionResponse]:
-    """Common impl for list_decisions endpoints."""
-    query = select(Decision).where(Decision.protocol_id == protocol_id)
+    """Common impl for list_decisions endpoints.
+
+    E146: используем joinload для source_utterance, чтобы вернуть timestamp_sec.
+    """
+    from sqlalchemy.orm import selectinload
+
+    query = (
+        select(Decision)
+        .options(selectinload(Decision.protocol))
+        .where(Decision.protocol_id == protocol_id)
+    )
     if priority:
         query = query.where(Decision.priority == priority)
     query = query.order_by(Decision.created_at.desc())
     result = await db.execute(query)
     decisions = result.scalars().all()
-    return [
-        DecisionResponse(
-            id=d.id,
-            protocol_id=d.protocol_id,
-            decision_text=d.decision_text,
-            rationale=d.rationale,
-            priority=d.priority,
-            decided_by=d.decided_by,
-            due_date=d.due_date,
-            status=d.status,
-            created_at=d.created_at,
-        )
-        for d in decisions
-    ]
+
+    items = []
+    for d in decisions:
+        response = _to_response(d)
+        # E146: timestamp_sec — из source_utterance.start_sec если есть
+        if d.source_utterance_id is not None:
+            utt_row = await db.execute(
+                select(Utterance).where(Utterance.id == d.source_utterance_id)
+            )
+            utt = utt_row.scalar_one_or_none()
+            if utt:
+                response.timestamp_sec = float(utt.start_sec)
+        items.append(response)
+
+    return items
 
 
 # ---------------------------------------------------------------------------

@@ -698,3 +698,60 @@ docker run --network=none html_mp_app
 - Frontend polling подтягивает новые через segments_count
 
 **Приоритет:** High (UX retention)
+
+## NFR-UX-1 (E133, E143): Latency UI обновления ≤ 200ms
+
+Метрика: время от появления новой реплики в БД до её отображения в UI.
+
+Требование: ≤ 200 мс для пользователя (визуально — мгновенно).
+
+Достигается через:
+- Polling 2 сек (E131) обновляет список utterance
+- append-only rendering (E133) — нет полной перерисовки
+- Compact cards (E143) — высота ~30px
+
+NFR-UX-2 (E144): Speaker badges всегда видимы
+
+Виден badge для каждой реплики, у которой есть хоть какой-то идентификатор спикера (id или label).
+
+## NFR-MULTI-1 (E148): Поддержка 6 языков (ru/en/de/es/fr/zh)
+
+- Default язык при создании протокола: `ru`
+- Язык можно изменить через `PATCH /protocols/{id}`
+- AI cleanup работает с указанным языком → лучше качество
+
+## NFR-MULTI-2 (E149): Перевод сохраняет оригинал
+
+- Каждая реплика **всегда** показывает оригинальный текст
+- Перевод (если есть) отображается **под** оригиналом
+- Метка: `🌐 EN:` / `🌐 DE:` и т.п.
+- Кэширование: повторный перевод бесплатен (из БД)
+
+## NFR-MULTI-3 (E147): AI-decisions не конфликтуют с ручными
+
+- AI-пометки и ручные хранятся в одной таблице Decision
+- Дедупликация по `source_utterance_id`
+- Любую метку (AI или ручную) можно снять кнопкой ⚖️
+
+## NFR-PAUSE-1 (E150): Pause отзывается ≤ 2 сек
+
+- POST /transcribe/pause/{id} → 200 ≤ 2 сек
+- BG-task корректно прерывается через `asyncio.CancelledError`
+- State записывается в БД синхронно до возврата
+
+## NFR-PAUSE-2 (E150): Resume работает cross-session
+
+- State хранится в БД (не в памяти)
+- Новый браузер / новая сессия — может вызвать /resume
+- Audio_hash защищает от ситуации "файл изменился"
+
+## NFR-RESUME-3 (E151): Audio hash mismatch → reset
+
+- Если hash не совпадает → log warning + progress = 0
+- Иначе — продолжаем с last_processed_sec
+
+## NFR-RESET-4 (E153): Повторная транскрибация чистая
+
+- DELETE FROM utterance WHERE protocol_id = X
+- DELETE FROM decision WHERE protocol_id = X
+- Не должно остаться дублей после повторной транскрибации
