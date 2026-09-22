@@ -792,3 +792,58 @@ WHISPER_VAD_FILTER=true
 VAD_MIN_SILENCE_DURATION_MS=1000
 VAD_THRESHOLD=0.5
 ```
+
+## Endpoint: GET /transcribe/progress/{task_id} (E131)
+
+Расширение существующего endpoint. Теперь возвращает `segments_count` = реальное число в БД:
+
+### Request
+
+```
+GET /api/v1/hmp/transcribe/progress/{task_id}
+```
+
+### Response (200)
+
+```json
+{
+  "id": "9ce1c990-5d96-423a-99f4-44d9556aa344",
+  "task_id": "9ce1c990-5d96-423a-99f4-44d9556aa344",
+  "protocol_id": "84e14bcc-4ec2-4b67-bda9-472d3eb166a2",
+  "status": "running",
+  "progress": 42,
+  "progress_percent": 42,
+  "message": "Обработка аудио... 30с",
+  "segments_count": 75,           ← E131: реальное число utterance в БД
+  "started_at": "2026-09-22T20:54:21Z"
+}
+```
+
+### Поля
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `status` | string | queued, running, completed, failed, cancelled |
+| `progress`, `progress_percent` | int (0-100) | Процент обработки |
+| `message` | string | Human-readable (current_step из БД) |
+| `segments_count` | int | **E131:** реальное число `utterance` для протокола (НЕ current_chunk!) |
+
+### Polling pattern
+
+```javascript
+const POLL_INTERVAL_MS = 2000;
+let lastUtteranceCount = 0;
+
+setInterval(async () => {
+    const progress = await api.getTranscriptionProgress(taskId);
+    updateProgressBar(progress);
+
+    if ((progress.segments_count || 0) > lastUtteranceCount) {
+        const utterances = await api.listUtterances(protocolId);
+        renderTranscript(utterances);
+        lastUtteranceCount = utterances.length;
+    }
+
+    if (isTerminal(progress.status)) clearInterval(poller);
+}, POLL_INTERVAL_MS);
+```

@@ -485,3 +485,15 @@ LIMIT 1;
 - `user_setting.whisper_model` — какая модель активна
 - `user_setting.use_gpu` — использовать GPU (влияет на compute_type)
 - `user_setting.default_language` — язык по умолчанию (например ru)
+
+## Streaming insertion pattern (E131)
+
+В таблице `utterance` теперь два пути вставки:
+
+1. **Потоковый (рекомендуется для production):**
+   - `transcription_service._persist_utterances_loop` пишет каждые 2 сек из очереди
+   - Сегменты становятся видны в UI в течение ~2 сек после их распознавания моделью
+
+2. **Batch (legacy/fallback):**
+   - `transcription_service._save_utterances` пишет одной транзакцией в конце
+   - Подходит для тестов / коротких записей (< 30 сек)

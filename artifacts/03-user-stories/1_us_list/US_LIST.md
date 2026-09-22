@@ -159,3 +159,8 @@
 - **Status:** Done (E118)
 - **Файл:** `US_058.md`
 - **Описание:** Настраиваемые параметры VAD (min_silence, threshold, speech_pad)
+
+## US-081: Потоковая запись реплик при транскрибации
+- **Status:** Done (E131/E132)
+- **Файл:** `US_081.md`
+- **Описание:** Сегменты появляются в UI в реальном времени через queue.Queue → persist_utterances_loop → frontend polling

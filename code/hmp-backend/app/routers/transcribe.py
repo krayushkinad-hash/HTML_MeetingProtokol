@@ -95,13 +95,12 @@ async def run_transcription(
     # Check status - allow restart if stuck in transcribing
     if protocol.status == "transcribing":
         # Allow restart - reset status first
-        # E093: Use "idle" (canonical frontend state) instead of "loaded"
+        # E128: "idle" нет в enum — используем "loaded"
         logger.info(
             "transcribe_protocol_already_transcribing_force_restart",
             protocol_id=str(protocol.id),
         )
-        protocol.status = "idle"
-        protocol.transcribed = False
+        protocol.status = "loaded"
         await db.commit()
     if protocol.status == "diarizing":
         raise HTTPException(
@@ -131,29 +130,19 @@ async def run_transcription(
     task_id = uuid.uuid4()
     estimated = _estimated_completion(audio_file.duration_sec)
 
-    # E102: Register in _jobs (transcription_progress) — needed for cancel_job
-    try:
-        from app.services.transcription_progress import create_job
-        create_job(
-            protocol_id=str(body.protocol_id),
-            task_id=str(task_id),
-        )
-    except Exception as create_job_err:
-        logger.warning("create_job_failed", error=str(create_job_err))
-
-    # E094: Create initial in-memory status with ALL fields
-    transcription_service._tasks[task_id] = _DummyStatus(  # noqa: SLF001 — service contract
+    # P0-fix: создаём in-memory запись сразу, чтобы get_status()
+    # возвращал хоть что-то до старта реальной работы.
+    # Иначе фронт видит только БД-фолбэк до первого запуска transcribe().
+    from app.services.transcription import (
+        TranscriptionStatus as _TS,
+        transcription_service as _svc,
+    )
+    _svc._tasks[task_id] = _TS(
         id=task_id,
         protocol_id=body.protocol_id,
         status="queued",
         progress_percent=0,
-        current_chunk=0,
-        total_chunks=None,
-        peak_rss_mb=None,
-        estimated_completion=estimated,
-        error_message=None,
-        wer_quality=None,
-        message="Инициализация...",  # E113: human-readable for UI
+        message="В очереди",
     )
 
     # Persist task in DB for survival across backend restarts (US-066)
@@ -191,21 +180,42 @@ async def run_transcription(
 
     async def _runner() -> None:
         try:
-            # E113: Pass real audio duration to transcribe for accurate estimates
-            await transcription_service.transcribe(
+            result = await transcription_service.transcribe(
                 protocol_id=body.protocol_id,
                 audio_path=audio_path,
                 task_id=task_id,
                 duration_sec=audio_file.duration_sec,
             )
-            # E116: Await final status update (don't fire-and-forget for final state)
+            # P0-fix: transcribe() может вернуть status="failed" без raise.
+            # Раньше _runner всегда писал "completed" — теряли провалы.
             from app.services.task_status import update_task_status_in_db
-            await update_task_status_in_db(task_id, "completed", progress=100.0)
-        except Exception as exc:  # pragma: no cover — defensive
+            if result.status == "failed":
+                await update_task_status_in_db(
+                    task_id,
+                    "failed",
+                    error=result.error_message or "Транскрипция не удалась",
+                )
+            elif result.status == "cancelled":
+                await update_task_status_in_db(
+                    task_id,
+                    "cancelled",
+                    error="Отменено пользователем",
+                )
+            else:
+                # transcribe() уже сделал финальный update "completed",
+                # но оставляем страховку на случай исключения между
+                # записью в transcribe() и выходом сюда.
+                await update_task_status_in_db(
+                    task_id, "completed", progress=100.0, message="Завершено",
+                )
+        except asyncio.CancelledError:
+            # Отмена через cancel_endpoint — статус уже записан в transcribe().
+            logger.info("transcribe_runner_cancelled", task_id=str(task_id))
+            raise
+        except Exception as exc:
             logger.exception(
                 "transcribe_runner_failed", task_id=str(task_id), error=str(exc)
             )
-            # E116: Await failure update
             try:
                 from app.services.task_status import update_task_status_in_db
                 await update_task_status_in_db(
@@ -359,36 +369,57 @@ async def get_transcription_progress(
     task_id: str, db: AsyncSession = Depends(get_db)
 ) -> dict:
     """Get transcription progress by task_id."""
-    # ... uses transcription_service.get_status(task_id) which reads from _tasks
+    # 1. In-memory (живая задача)
     try:
         status_obj = transcription_service.get_status(task_id)
-        if status_obj is not None:
-            return _serialize_task_status(task_id, status_obj)
-    except (ValueError, Exception):
-        pass
+    except Exception as e:
+        logger.warning("get_status_failed", task_id=task_id, error=str(e))
+        status_obj = None
 
-    # Not found in _tasks — try DB
+    if status_obj is not None:
+        try:
+            return _serialize_task_status(task_id, status_obj)
+        except Exception as e:
+            logger.exception(
+                "serialize_task_status_failed", task_id=task_id, error=str(e)
+            )
+
+    # 2. DB fallback
     try:
         from app.db.models import TranscriptionTask as _TT
+        from app.db.models import Utterance as _U
+        from sqlalchemy import func, select as _select
         task = await db.get(_TT, task_id)
         if task:
+            # E131: реальное число уже сохранённых utterance
+            count_result = await db.execute(
+                _select(func.count(_U.id)).where(_U.protocol_id == task.protocol_id)
+            )
+            utterances_count = count_result.scalar() or 0
             return {
                 "id": str(task.id),
                 "task_id": str(task.id),
                 "protocol_id": str(task.protocol_id),
                 "status": task.status,
                 "progress": task.progress or 0,
-                "message": task.error_message or f"Транскрипция: {task.status}",
-                "segments_count": task.current_chunk or 0,
+                "progress_percent": task.progress or 0,
+                # E127: current_step → message
+                "message": (
+                    task.error_message
+                    or task.current_step
+                    or f"Транскрипция: {task.status}"
+                ),
+                "segments_count": utterances_count,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("db_progress_lookup_failed", task_id=task_id, error=str(e))
 
-    # Not found
+    # 3. Not found
     return {
         "task_id": task_id,
         "status": "unknown",
         "progress": 0,
+        "progress_percent": 0,
         "message": "Задача не найдена или сервер был перезапущен",
     }
 
@@ -402,22 +433,17 @@ def _serialize_task_status(task_id, status_obj) -> dict:
             "protocol_id": str(status_obj.protocol_id),
             "status": status_obj.status,
             "progress": status_obj.progress_percent,
+            "progress_percent": status_obj.progress_percent,
             "message": status_obj.message or status_obj.error_message or f"Транскрипция: {status_obj.status}",
             "segments_count": status_obj.current_chunk or 0,
             "peak_rss_mb": status_obj.peak_rss_mb,
             "estimated_completion": (
                 status_obj.estimated_completion.isoformat()
-                if status_obj.estimated_completion
-                else None
+                if status_obj.estimated_completion else None
             ),
         }
     except Exception:
-        return {
-            "task_id": str(task_id),
-            "status": "unknown",
-            "progress": 0,
-            "message": "Ошибка сериализации",
-        }
+        return {"task_id": str(task_id), "status": "unknown", "progress": 0, "message": "Ошибка сериализации"}
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +586,8 @@ async def _get_progress_internal(
                     age_sec=int(age_sec),
                     registry_size=len(_active_transcription_tasks),
                 )
-            elif age_sec > 1200 and (task.progress or 0) < 0.1:
+            # E122: 60 минут вместо 20 (CPU base на часовой записи — норма, не stale)
+            elif age_sec > 3600 and (task.progress or 0) < 0.1:
                 is_stale = True
 
         if is_stale:
@@ -592,7 +619,8 @@ async def _get_progress_internal(
             "protocol_id": str(protocol_id),
             "status": task.status,
             "progress": task.progress or 0,
-            "message": task.error_message or f"Транскрипция: {task.status}",
+            # E127: current_step хранит "Обработка 145с..." — отдаём его во фронт
+            "message": task.error_message or task.current_step or f"Транскрипция: {task.status}",
             "segments_count": task.current_chunk or 0,
             "started_at": task.started_at.isoformat() if task.started_at else None,
         }
@@ -600,9 +628,10 @@ async def _get_progress_internal(
     # No active task - reset stuck protocol if needed
     if protocol.status == "transcribing":
         try:
-            protocol.status = "idle"
+            # E128: "idle" нет в enum — используем "loaded"
+            protocol.status = "loaded"
             await db.commit()
-            logger.info("stuck_protocol_reset_to_idle", protocol_id=str(protocol_id))
+            logger.info("stuck_protocol_reset_to_loaded", protocol_id=str(protocol_id))
         except Exception as reset_err:
             await db.rollback()
             logger.warning(
@@ -626,55 +655,4 @@ async def _get_progress_internal(
     }
 
 
-# ---------------------------------------------------------------------------
-# Lightweight in-memory status placeholder
-# ---------------------------------------------------------------------------
-
-
-class _DummyStatus:
-    """Stand-in status object when the service has not yet started the job.
-
-    The service may store either ``TranscriptionStatus`` ORM rows (when the
-    model is wired up) or simple objects with the same attributes. This class
-    keeps the contract stable.
-    """
-
-    __slots__ = (
-        "id",
-        "protocol_id",
-        "status",
-        "progress_percent",
-        "current_chunk",
-        "total_chunks",
-        "peak_rss_mb",
-        "estimated_completion",
-        "error_message",
-        "wer_quality",
-        "message",  # E113: human-readable status for UI
-    )
-
-    def __init__(
-        self,
-        id: uuid.UUID,
-        protocol_id: uuid.UUID,
-        status: str,
-        progress_percent: int,
-        current_chunk: int | None = None,
-        total_chunks: int | None = None,
-        peak_rss_mb: float | None = None,
-        estimated_completion: datetime | None = None,
-        error_message: str | None = None,
-        wer_quality: float | None = None,
-        message: str | None = None,  # E113
-    ) -> None:
-        self.id = id
-        self.protocol_id = protocol_id
-        self.status = status
-        self.progress_percent = progress_percent
-        self.current_chunk = current_chunk
-        self.total_chunks = total_chunks
-        self.peak_rss_mb = peak_rss_mb
-        self.estimated_completion = estimated_completion
-        self.error_message = error_message
-        self.wer_quality = wer_quality
-        self.message = message
+# E124: _DummyStatus class удалён — transcribe() создаёт правильный TranscriptionStatus

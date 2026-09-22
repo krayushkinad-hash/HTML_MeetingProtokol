@@ -89,6 +89,12 @@ async def list_utterances(
     limit: int = Query(100, ge=1, le=500),
     speaker_id: uuid.UUID | None = Query(None),
     low_confidence_only: bool = Query(False),
+    # E133: after_sec для инкрементальной выборки (streaming)
+    after_sec: float | None = Query(
+        None,
+        ge=0,
+        description="Вернуть только реплики со start_sec > after_sec (для polling)",
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """List utterances with pagination (API §4.6).
@@ -110,8 +116,11 @@ async def list_utterances(
         base = base.where(Utterance.speaker_id == speaker_id)
     if low_confidence_only:
         base = base.where(Utterance.low_confidence.is_(True))
+    # E133: инкрементальная выборка — только новые реплики
+    if after_sec is not None:
+        base = base.where(Utterance.start_sec > after_sec)
 
-    # Total count
+    # Total count (без пагинации — для UI)
     total_query = select(func.count()).select_from(base.subquery())
     total = (await db.execute(total_query)).scalar() or 0
 

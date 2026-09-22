@@ -490,6 +490,7 @@ async function startExport(protocol) {
 let transcriptionPollInterval = null;
 let currentTranscriptionTaskId = null;
 let _startTranscribeLock = false;  // E109: lock to prevent double-call
+let _pollingActive = false;        // E134: защита от двойного запуска polling
 
 async function checkExistingTranscription(protocol) {
     // E077: Reset state BEFORE checking
@@ -622,10 +623,23 @@ async function startTranscribe(protocol) {
 }
 
 function startProgressPolling(protocol, taskId) {
-    // Clear existing interval
+    // Clear existing interval (E134: предотвращаем двойной polling)
     if (transcriptionPollInterval) {
         clearInterval(transcriptionPollInterval);
+        transcriptionPollInterval = null;
     }
+
+    // E134: защита от двойного запуска
+    if (currentTranscriptionTaskId === taskId && _pollingActive) {
+        console.warn('Polling already active for taskId:', taskId);
+        return;
+    }
+    _pollingActive = true;
+
+    // E134: сброс счётчика для новой задачи
+    let _lastUtteranceCount = 0;
+    // E134: максимальный start_sec, который уже отрисован
+    let _lastRenderedSec = 0;
 
     // Poll every 2 seconds
     transcriptionPollInterval = setInterval(async () => {
@@ -635,16 +649,73 @@ function startProgressPolling(protocol, taskId) {
             // Update UI with progress
             updateProgressBar(progress);
 
+            // E133: подтягиваем только НОВЫЕ реплики через after_sec
+            const segCount = progress.segments_count || 0;
+            if (segCount > _lastUtteranceCount) {
+                try {
+                    // E133: after_sec — запрос вернёт только новые
+                    // E134: limit=500 (вместо 1000, чтобы не получать 422)
+                    const newOnes = await api.listUtterances(protocol.id, {
+                        limit: 500,
+                        after_sec: _lastRenderedSec,
+                    });
+                    const items = Array.isArray(newOnes)
+                        ? newOnes
+                        : (newOnes && newOnes.items) || [];
+                    if (items.length > 0) {
+                        await appendUtteranceItems(protocol.id, items);
+                        // Обновляем lastRenderedSec до максимального
+                        const maxSec = Math.max(
+                            ...items.map(u => parseFloat(u.start_sec || 0))
+                        );
+                        if (maxSec > _lastRenderedSec) {
+                            _lastRenderedSec = maxSec;
+                        }
+                        _lastUtteranceCount = Math.max(_lastUtteranceCount, items.length);
+                    }
+                } catch (e) {
+                    console.warn('Failed to fetch utterances:', e);
+                }
+            }
+
             // Check if done
-            if (['completed', 'failed', 'cancelled', 'finished', 'done'].includes(progress.status?.toLowerCase())) {
+            if (['completed', 'failed', 'cancelled', 'finished', 'done']
+                .includes(progress.status?.toLowerCase())) {
                 clearInterval(transcriptionPollInterval);
                 transcriptionPollInterval = null;
                 currentTranscriptionTaskId = null;
+                _pollingActive = false;
                 updateTranscribeButton(protocol, 'idle');
                 hideProgressBar();
 
+                // E134: финальная полная загрузка (на случай если что-то пропустили)
+                try {
+                    const finalList = await api.listUtterances(protocol.id, {
+                        limit: 500,
+                        after_sec: 0,
+                    });
+                    const finalItems = Array.isArray(finalList)
+                        ? finalList
+                        : (finalList && finalList.items) || [];
+                    if (finalItems.length > 0) {
+                        const panel = document.getElementById('panel-transcript');
+                        if (panel && typeof renderUtteranceItem === 'function') {
+                            panel.innerHTML = `
+                                <div class="transcript-toolbar">
+                                    <span class="text-muted">${finalItems.length} реплик</span>
+                                </div>
+                                <div class="transcript-list">
+                                    ${finalItems.map(u => renderUtteranceItem(u, [])).join('')}
+                                </div>
+                            `;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Final utterances fetch failed:', e);
+                }
+
                 if (progress.status === 'completed' || progress.status === 'finished' || progress.status === 'done') {
-                    toast.success('Транскрипция завершена! Обновите страницу.');
+                    toast.success('Транскрипция завершена!');
                 } else if (progress.status === 'failed') {
                     toast.error(`Транскрипция провалилась: ${progress.message || ''}`);
                 } else if (progress.status === 'cancelled') {
@@ -656,6 +727,48 @@ function startProgressPolling(protocol, taskId) {
         }
     }, 2000);
 }
+
+async function appendUtteranceItems(protocolId, items) {
+    """E133: append-only — добавляет новые реплики без перерисовки списка."""
+    const panel = document.getElementById('panel-transcript');
+    if (!panel || typeof renderUtteranceItem !== 'function') return;
+
+    let list = panel.querySelector('.transcript-list');
+    if (!list) {
+        // Первая инициализация — создаём структуру
+        const toolbar = panel.querySelector('.transcript-toolbar');
+        panel.innerHTML = `
+            <div class="transcript-toolbar">
+                <span class="text-muted">0 реплик</span>
+            </div>
+            <div class="transcript-list"></div>
+        `;
+        list = panel.querySelector('.transcript-list');
+    }
+
+    // Запоминаем был ли пользователь внизу
+    const atBottom =
+        panel.scrollHeight - panel.scrollTop - panel.clientHeight < 50;
+
+    // Append-only — никаких innerHTML на весь список
+    for (const u of items) {
+        const html = renderUtteranceItem(u, []);
+        list.insertAdjacentHTML('beforeend', html);
+    }
+
+    // Обновляем счётчик в toolbar
+    const counter = panel.querySelector('.transcript-toolbar .text-muted');
+    if (counter) {
+        const total = list.children.length;
+        counter.textContent = `${total} реплик`;
+    }
+
+    // Автоскролл, если был внизу
+    if (atBottom) {
+        panel.scrollTop = panel.scrollHeight;
+    }
+}
+
 
 function updateProgressBar(progress) {
     // E113: Show human-readable message + percent

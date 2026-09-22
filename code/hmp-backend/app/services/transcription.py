@@ -6,7 +6,8 @@ Chunks of 30 sec per NFR §QG-7.
 US-005: Real Whisper integration with progress tracking.
 """
 import asyncio
-import time  # E119: used for transcribe_start_time / heartbeat elapsed
+import queue  # E131: для потоковой записи utterance из worker thread
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,7 +25,10 @@ logger = get_logger(__name__)
 class TranscriptionStatus:
     id: uuid.UUID
     protocol_id: uuid.UUID
-    status: Literal["queued", "processing", "paused", "completed", "failed", "cancelled"] = "queued"
+    status: Literal[
+        "queued", "processing", "paused",
+        "completed", "failed", "cancelled",
+    ] = "queued"
     progress_percent: int = 0
     current_chunk: int | None = None
     total_chunks: int | None = None
@@ -32,7 +36,6 @@ class TranscriptionStatus:
     estimated_completion: datetime | None = None
     error_message: str | None = None
     wer_quality: float | None = None
-    # E113: Human-readable status message for UI ("Инициализация...", "Обработка 30с...")
     message: str | None = None
 
 
@@ -42,37 +45,42 @@ class TranscriptionService:
     def __init__(self) -> None:
         self._model = None  # Lazy-loaded
         self._tasks: dict[uuid.UUID, TranscriptionStatus] = {}
-        # US-066: In-memory progress tracking (consumed by progress endpoint)
         self._progress_callbacks: dict[uuid.UUID, callable] = {}
+        # E131: thread-safe очередь для потоковой записи utterance
+        # worker thread пишет, persist loop в main event loop читает
+        self._utterance_queue: queue.Queue = queue.Queue()
 
     def _load_model(self):
         """Lazy-load Whisper model.
 
-        US-005 + E052: Graceful handling of missing faster-whisper.
-        Install with: pip install faster-whisper
+        E052: Graceful handling of missing faster-whisper.
         E111: Detect cudnn issues and fallback to CPU automatically.
+        E058: Fallback to tiny if primary fails (OOM, etc.).
+        E125: set fallback flag so transcribe() can notify user.
         """
         if self._model is None:
             from faster_whisper import WhisperModel
 
-            # E111: Auto-detect cudnn availability
             use_device = settings.whisper_device
             use_compute = settings.whisper_compute_type
+
             if use_device == "cuda":
                 try:
                     import ctypes
-                    # Try loading cudnn64_9.dll or cudnn64_8.dll
-                    for dll_name in ["cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll"]:
+                    for dll_name in ("cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll"):
                         try:
                             ctypes.CDLL(dll_name)
                             break
                         except OSError:
                             continue
                     else:
-                        # No cudnn found
                         logger.warning(
                             "cudnn_not_found_fallback_to_cpu",
-                            attempted_dlls=["cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll"],
+                            attempted_dlls=[
+                                "cudnn64_9.dll",
+                                "cudnn64_8.dll",
+                                "cudnn64_7.dll",
+                            ],
                         )
                         use_device = "cpu"
                         use_compute = "int8"
@@ -81,26 +89,27 @@ class TranscriptionService:
                     use_device = "cpu"
                     use_compute = "int8"
 
-            # Try primary model first (e.g., large-v3)
             primary = settings.whisper_model
             try:
                 logger.info("loading_whisper_model", model=primary, device=use_device)
                 self._model = WhisperModel(
-                    primary,
-                    device=use_device,
-                    compute_type=use_compute,
+                    primary, device=use_device, compute_type=use_compute,
                 )
                 logger.info("whisper_model_loaded", model=primary, device=use_device)
+                self._last_fallback_reason = None
                 return self._model
             except Exception as e:
-                # E058: Fallback to tiny if primary fails (OOM, etc.)
-                logger.warning("whisper_primary_model_failed", primary=primary, error=str(e))
+                logger.warning(
+                    "whisper_primary_model_failed", primary=primary, error=str(e),
+                )
 
-            # Fallback to tiny (CPU-friendly)
             try:
-                logger.info("whisper_fallback_to_tiny")
+                logger.info("whisper_fallback_to_tiny", requested=primary)
                 self._model = WhisperModel("tiny", device="cpu", compute_type="int8")
                 logger.info("whisper_fallback_loaded", model="tiny")
+                self._last_fallback_reason = (
+                    f"Модель '{primary}' не загрузилась, используется tiny"
+                )
                 return self._model
             except Exception as fb_err:
                 logger.error("whisper_all_models_failed", error=str(fb_err))
@@ -114,40 +123,34 @@ class TranscriptionService:
         return self._model
 
     async def transcribe(
-        self, protocol_id: uuid.UUID, audio_path: Path, task_id: uuid.UUID,
+        self,
+        protocol_id: uuid.UUID,
+        audio_path: Path,
+        task_id: uuid.UUID,
         duration_sec: float | None = None,
     ) -> TranscriptionStatus:
-        """Transcribe audio file with progress tracking.
-
-        US-005: Real Whisper transcription with:
-        - Progress updates (every segment processed)
-        - Error handling with status update
-        - DB persistence of utterances (TODO: integration with sessions)
-        """
+        """Transcribe audio file with progress tracking."""
         status = TranscriptionStatus(
             id=task_id,
             protocol_id=protocol_id,
             status="processing",
             progress_percent=0,
+            message="Инициализация...",
         )
         self._tasks[task_id] = status
 
         try:
-            # Step 1: Load model (slow on first call, ~30-120s for large-v3 CPU)
+            # Step 1: Load model
             logger.info("transcribe_loading_model", task_id=str(task_id))
-            # US-058: Try active model via model_manager
             from app.services.whisper_models import model_manager
             active = model_manager.get_active_model()
 
-            # E070: Check that active model is ACTUALLY downloaded (not just selected)
+            # E070: Check that active model is ACTUALLY downloaded
             if not model_manager.is_downloaded(active):
                 logger.warning(
-                    "active_model_not_downloaded",
-                    active=active,
-                    task_id=str(task_id),
+                    "active_model_not_downloaded", active=active, task_id=str(task_id),
                 )
                 from app.services.whisper_models import AVAILABLE_MODELS
-                # Pick first available downloaded model
                 fallback_used = None
                 for fallback in AVAILABLE_MODELS:
                     if model_manager.is_downloaded(fallback):
@@ -158,50 +161,74 @@ class TranscriptionService:
                     settings.whisper_model = fallback_used
                     logger.info(
                         "fallback_to_downloaded",
-                        from_model=active,
-                        to_model=fallback_used,
+                        from_model=active, to_model=fallback_used,
                         task_id=str(task_id),
                     )
                 else:
-                    # NO model downloaded - return clear error to user
                     logger.error(
-                        "no_models_downloaded",
-                        task_id=str(task_id),
-                        active=active,
+                        "no_models_downloaded", task_id=str(task_id), active=active,
                     )
                     status.status = "failed"
                     status.error_message = (
                         f"Модель '{active}' не скачана и нет резервных. "
-                        f"Скачайте модель в Настройки → Транскрипция → Управление моделями"
+                        f"Скачайте модель в Настройки → Транскрипция → "
+                        f"Управление моделями"
                     )
                     status.progress_percent = 0
-                    # Persist failure to DB (E069)
+                    # P0-fix: было обращение к SyncSessionLocal/_DBTask/_dt,
+                    # которых нет в модуле. Заменено на безопасный async-хелпер.
                     try:
-                        with SyncSessionLocal() as s:
-                            from sqlalchemy import update as _upd
-                            s.execute(
-                                _upd(_DBTask)
-                                .where(_DBTask.id == task_id)
-                                .values(status="failed", error_message=status.error_message, finished_at=_dt.utcnow())
-                            )
-                            s.commit()
-                    except Exception:
-                        pass
-                    return status  # ← exit early, don't try _load_model
+                        from app.services.task_status import update_task_status_in_db
+                        await update_task_status_in_db(
+                            task_id, "failed", error=status.error_message,
+                        )
+                    except Exception as db_err:
+                        logger.warning(
+                            "no_models_failed_persist_error", error=str(db_err),
+                        )
+                    return status
 
-            # Log which model will be used
             logger.info(
                 "transcribe_using_model",
-                model=settings.whisper_model,
-                task_id=str(task_id),
+                model=settings.whisper_model, task_id=str(task_id),
             )
+
+            # E131: очистка очереди от предыдущего запуска
+            while not self._utterance_queue.empty():
+                try:
+                    self._utterance_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            # E131: удаляем старые utterances для этого протокола (перезапись)
+            try:
+                from sqlalchemy import delete
+                from app.db.session import AsyncSessionLocal
+                from app.db.models import Utterance as _OldU
+                async with AsyncSessionLocal() as clean_session:
+                    await clean_session.execute(
+                        delete(_OldU).where(_OldU.protocol_id == protocol_id)
+                    )
+                    await clean_session.commit()
+                logger.info("old_utterances_cleared", protocol_id=str(protocol_id))
+            except Exception as clear_err:
+                logger.warning(
+                    "old_utterances_clear_failed",
+                    protocol_id=str(protocol_id),
+                    error=str(clear_err),
+                )
 
             model = await asyncio.to_thread(self._load_model)
             logger.info(
                 "transcribe_model_loaded",
-                task_id=str(task_id),
-                model_loaded=model is not None,
+                task_id=str(task_id), model_loaded=model is not None,
             )
+
+            # E125: notify user if we fell back to tiny
+            fallback_reason = getattr(self, "_last_fallback_reason", None)
+            if fallback_reason:
+                status.message = fallback_reason
+                self._last_fallback_reason = None
 
             # Step 2: Validate audio file exists
             if not audio_path.exists():
@@ -216,40 +243,27 @@ class TranscriptionService:
                 beam_size=settings.whisper_beam_size,
             )
 
-            # E113: Heartbeat progress — обновляем каждые 2 сек
-            # чтобы UI не висел на 0% пока Whisper думает
+            # E113/E121: heartbeat + persist loop share one stop event and
+            # one start time. Previously there were three duplicate
+            # stop_heartbeat = asyncio.Event() — removed.
             stop_heartbeat = asyncio.Event()
             transcribe_start_time = time.time()
-            # E113: Heartbeat progress — обновляем каждые 2 сек
-            # чтобы UI не висел на 0% пока Whisper думает
-            # E113-fix: heartbeat НЕ трогает БД (только message in-memory).
-            # Прогресс в БД обновится один раз в конце через _update_task_status_in_db.
-            stop_heartbeat = asyncio.Event()
-            transcribe_start_time = time.time()
-
-            # Use real duration if passed (from run_transcription)
-            # E113: Use real duration_sec parameter (not file size heuristic)
             self._current_audio_duration = duration_sec or 0
-            estimated_duration_sec = max(
-                60,
-                int(duration_sec or 0) or int(
-                    (audio_path.stat().st_size / (1024 * 1024)) * 60
-                ),
-            )
 
             async def heartbeat_progress():
-                """Update progress message while transcription is running.
+                """Update in-memory message every 2s while Whisper works.
 
-                Whisper на CPU может думать 30-60 сек между сегментами.
-                Heartbeat гарантирует что UI видит живое сообщение.
-
-                E113-fix: НЕ обновляет progress_percent (это делает progress_cb).
-                Только обновляет message — чтобы UI знал, что процесс жив.
+                Does NOT touch progress_percent — that's progress_cb's job.
                 """
                 while not stop_heartbeat.is_set():
                     elapsed = time.time() - transcribe_start_time
-                    # Show real elapsed in message — but DO NOT touch progress_percent
                     status.message = f"Обработка аудио... {int(elapsed)}с"
+                    logger.debug(
+                        "heartbeat",
+                        task_id=str(task_id),
+                        elapsed=int(elapsed),
+                        progress=status.progress_percent,
+                    )
                     try:
                         await asyncio.wait_for(stop_heartbeat.wait(), timeout=2.0)
                     except asyncio.TimeoutError:
@@ -257,7 +271,49 @@ class TranscriptionService:
 
             heartbeat_task = asyncio.create_task(heartbeat_progress())
 
-            # US-066: Progress callback for UI - updates BOTH memory and DB
+            async def persist_progress_loop():
+                """Persist status.progress_percent + message to DB every 2s.
+
+                Runs from the main event loop (not from a worker thread),
+                so asyncio.create_task inside is safe.
+                """
+                from app.services.task_status import update_task_status_in_db
+                while not stop_heartbeat.is_set():
+                    try:
+                        await update_task_status_in_db(
+                            task_id,
+                            "running",
+                            progress=float(status.progress_percent),
+                            message=status.message or "",
+                        )
+                        logger.debug(
+                            "progress_persisted_to_db",
+                            task_id=str(task_id),
+                            progress=status.progress_percent,
+                            message=status.message,
+                        )
+                    except Exception as db_err:
+                        logger.warning(
+                            "progress_persist_failed",
+                            task_id=str(task_id),
+                            error=str(db_err),
+                        )
+                    try:
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+
+            persist_task = asyncio.create_task(persist_progress_loop())
+
+            # E131: потоковая запись utterance — сегменты появляются в БД
+            # по мере генерации, не дожидаясь конца транскрибации.
+            utterances_task = asyncio.create_task(
+                self._persist_utterances_loop(protocol_id, stop_heartbeat)
+            )
+
+            # US-066: Progress callback — in-memory ONLY.
+            # E131: worker thread кладёт сегмент в queue.Queue,
+            # persist_utterances_loop в main event loop забирает и пишет.
             def progress_cb(percent: int, current_seg: int, total_segs: int | None) -> None:
                 pct = min(100, percent)
                 status.progress_percent = pct
@@ -271,56 +327,41 @@ class TranscriptionService:
                     segment=current_seg,
                     total_segments=total_segs,
                 )
-                # E115: Replace SyncSessionLocal with async fire-and-forget
-                # SyncSessionLocal в async контексте даёт greenlet_spawn ошибку.
-                try:
-                    from app.services.task_status import update_task_status_in_db
-                    asyncio.create_task(update_task_status_in_db(
-                        task_id,
-                        "running",
-                        progress=float(pct),
-                    ))
-                except Exception as db_err:
-                    # Don't crash transcription because of progress save issue
-                    logger.debug("progress_db_update_failed", error=str(db_err))
 
-            # Run eager-mode (consumes generator)
             def _run_transcribe_eager():
-                """Eagerly consume transcribe() generator.
+                """Consume the faster-whisper generator eagerly.
 
-                Returns:
-                    (segments_list, info)
-
-                Why eager: `transcribe()` returns a generator.
-                Calling it once returns a generator object, NOT a tuple.
-                To get info (duration, language), must consume first.
+                E131: для каждого сегмента кладём dict в self._utterance_queue
+                (thread-safe). persist loop в main event loop забирает и пишет в БД.
                 """
                 segments_generator, info = model.transcribe(
                     str(audio_path),
                     language=settings.whisper_language,
                     beam_size=settings.whisper_beam_size,
-                    word_timestamps=False,  # faster
-                    # E118: Pass VAD parameters from settings
-                # Use only when VAD is enabled (default off to preserve all audio)
-                vad_filter=settings.whisper_vad_filter,
-                vad_parameters=(
-                    {
-                        "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
-                        "speech_pad_ms": settings.vad_speech_pad_ms,
-                        "threshold": settings.vad_threshold,
-                    }
-                    if settings.whisper_vad_filter
-                    else None
-                ),
+                    word_timestamps=False,
+                    vad_filter=settings.whisper_vad_filter,
+                    vad_parameters=(
+                        {
+                            "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                            "speech_pad_ms": settings.vad_speech_pad_ms,
+                            "threshold": settings.vad_threshold,
+                        }
+                        if settings.whisper_vad_filter
+                        else None
+                    ),
                 )
 
-                # Estimate total duration from info
                 total_duration = info.duration or 0.0
-
                 segments_list = []
                 for seg in segments_generator:
                     segments_list.append(seg)
-                    # Calculate progress based on segment end time vs total
+                    # E131: кладём сегмент в очередь для persist loop
+                    self._utterance_queue.put({
+                        "start": float(seg.start),
+                        "end": float(seg.end),
+                        "text": seg.text or "",
+                        "avg_logprob": getattr(seg, "avg_logprob", None),
+                    })
                     if total_duration > 0:
                         pct = min(100, int((seg.end / total_duration) * 100))
                         progress_cb(pct, len(segments_list), None)
@@ -329,13 +370,12 @@ class TranscriptionService:
 
             try:
                 segments_list, info = await asyncio.to_thread(_run_transcribe_eager)
-
                 status.progress_percent = 100
                 status.status = "completed"
-                status.wer_quality = 0.0  # TODO: calculate from segments
+                status.wer_quality = 0.0
             finally:
-                # E113-fix: heartbeat всегда останавливается (даже при исключении)
                 stop_heartbeat.set()
+
                 try:
                     await asyncio.wait_for(heartbeat_task, timeout=2.0)
                 except asyncio.TimeoutError:
@@ -345,18 +385,84 @@ class TranscriptionService:
                     except asyncio.CancelledError:
                         pass
 
-            # E115: Persist completion to DB — use fire-and-forget
-            # SyncSessionLocal в async контексте даёт greenlet_spawn ошибку.
-            # Используем _update_task_status_in_db (async).
+                try:
+                    await asyncio.wait_for(persist_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    persist_task.cancel()
+                    try:
+                        await persist_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # E132: utterances_task может занять больше времени —
+                # внутри финальный flush. Даём ему 15 сек.
+                try:
+                    await asyncio.wait_for(utterances_task, timeout=15.0)
+                except asyncio.TimeoutError:
+                    utterances_task.cancel()
+                    try:
+                        await utterances_task
+                    except asyncio.CancelledError:
+                        pass
+
+            # E129: Сохраняем сегменты ДО финального update_task_status_in_db
+            if segments_list:
+                try:
+                    saved = await self._save_utterances(protocol_id, segments_list)
+                    status.message = f"Сохранено реплик: {saved}"
+                    logger.info(
+                        "save_utterances_done",
+                        task_id=str(task_id),
+                        count=saved,
+                    )
+                except Exception as save_err:
+                    logger.exception(
+                        "save_utterances_failed",
+                        task_id=str(task_id),
+                        protocol_id=str(protocol_id),
+                        error=str(save_err),
+                    )
+                    status.message = f"Транскрибация готова, но сохранение упало: {save_err}"
+
+                # E130: помечаем протокол как готовый (есть utterance)
+                try:
+                    from sqlalchemy import update as _upd_proto
+                    from app.db.session import AsyncSessionLocal
+                    from app.db.models import Protocol as _Proto
+
+                    async with AsyncSessionLocal() as proto_session:
+                        await proto_session.execute(
+                            _upd_proto(_Proto)
+                            .where(_Proto.id == protocol_id)
+                            .values(status="ready")
+                        )
+                        await proto_session.commit()
+                    logger.info(
+                        "protocol_marked_ready",
+                        protocol_id=str(protocol_id),
+                    )
+                except Exception as proto_err:
+                    logger.warning(
+                        "protocol_status_update_failed",
+                        protocol_id=str(protocol_id),
+                        error=str(proto_err),
+                    )
+
+            # Финальный статус — после сохранения
             try:
                 from app.services.task_status import update_task_status_in_db
-                asyncio.create_task(update_task_status_in_db(
+                await update_task_status_in_db(
                     task_id,
-                    "completed",
+                    "completed" if status.status != "failed" else "failed",
                     progress=100.0,
-                ))
+                    message=status.message or "Завершено",
+                )
             except Exception as db_err:
-                logger.warning("completion_db_update_failed", error=str(db_err))
+                logger.warning(
+                    "completion_db_update_failed",
+                    task_id=str(task_id),
+                    error=str(db_err),
+                )
 
             logger.info(
                 "transcription_completed",
@@ -368,81 +474,238 @@ class TranscriptionService:
                 num_segments=len(segments_list),
             )
 
-            # TODO (US-066): Insert utterances into DB
-            # await self._save_utterances(protocol_id, segments_list, info)
+        except asyncio.CancelledError:
+            # P2-fix: раньше CancelledError (BaseException) не ловился
+            # except Exception, и статус оставался "processing".
+            status.status = "cancelled"
+            status.message = "Отменено пользователем"
+            logger.info("transcription_cancelled", task_id=str(task_id))
+            try:
+                from app.services.task_status import update_task_status_in_db
+                await update_task_status_in_db(
+                    task_id,
+                    "cancelled",
+                    error="Отменено пользователем",
+                )
+            except Exception:
+                pass
+            raise
 
         except Exception as e:
             status.status = "failed"
             status.error_message = str(e)[:1000]
             logger.exception("transcription_failed", task_id=str(task_id), error=str(e))
-
-            # E115: async fire-and-forget
+            # P0-fix: await вместо create_task — гарантируем запись до выхода.
             try:
                 from app.services.task_status import update_task_status_in_db
-                asyncio.create_task(update_task_status_in_db(
-                    task_id,
-                    "failed",
-                    error=status.error_message,
-                ))
+                await update_task_status_in_db(
+                    task_id, "failed", error=status.error_message,
+                )
             except Exception as db_err:
-                logger.warning("failure_db_update_failed", error=str(db_err))
+                logger.warning(
+                    "failure_db_update_failed",
+                    task_id=str(task_id),
+                    error=str(db_err),
+                )
             raise
 
         return status
 
-    def get_status(self, task_id: uuid.UUID) -> TranscriptionStatus | None:
-        """Get task status from in-memory dict OR database (E045).
+    async def _persist_utterances_loop(
+        self,
+        protocol_id: uuid.UUID,
+        stop_event: asyncio.Event,
+    ) -> int:
+        """Каждые 2 сек забирает сегменты из очереди и пишет в БД пачкой.
 
-        First check in-memory (live tasks), then fall back to DB.
+        E131/E132: работает в главном event loop. progress_cb в worker thread
+        кладёт сегменты в queue.Queue (thread-safe). После завершения —
+        финальный flush остатка.
+
+        Args:
+            protocol_id: UUID протокола для utterance
+            stop_event: asyncio.Event останавливающий loop
+
+        Returns:
+            int: общее количество сохранённых utterance
         """
-        # 1. Check in-memory dict (live tasks)
-        if task_id in self._tasks:
-            return self._tasks[task_id]
+        from decimal import Decimal
+        from app.db.session import AsyncSessionLocal
+        from app.db.models import Utterance
 
-        # 2. Fall back to DB (persistent storage for completed/cancelled tasks)
-        try:
-            from app.db.session import AsyncSessionLocal
-            from app.db.models import TranscriptionTask
-            from sqlalchemy import select as _select
+        batch_total = 0
 
-            async def _load_from_db():
+        async def save_batch(batch):
+            nonlocal batch_total
+            if not batch:
+                return
+            try:
                 async with AsyncSessionLocal() as session:
-                    result = await session.execute(
-                        _select(TranscriptionTask).where(
-                            TranscriptionTask.id == task_id
+                    for seg in batch:
+                        text = (seg.get("text") or "").strip()
+                        if not text:
+                            continue
+                        u = Utterance(
+                            protocol_id=protocol_id,
+                            speaker_id=None,
+                            start_sec=Decimal(str(round(seg["start"], 3))),
+                            end_sec=Decimal(str(round(seg["end"], 3))),
+                            text=text,
+                            text_original=text,
+                            confidence=None,
+                            low_confidence=False,
+                            important=False,
+                            corrected_by_llm=False,
                         )
-                    )
-                    db_task = result.scalar_one_or_none()
-                    if db_task:
-                        # Convert DB model to TranscriptionStatus
-                        from app.routers.transcribe import _serialize_task_status
-                        # Create a TranscriptionStatus-like object
-                        class _StatusAdapter:
-                            def __init__(self, db_t):
-                                self.id = db_t.id
-                                self.protocol_id = db_t.protocol_id
-                                self.status = db_t.status
-                                self.progress_percent = db_t.progress_percent or 0
-                                self.error_message = db_t.error_message
-                                self.estimated_completion = db_t.estimated_completion
-                        return _StatusAdapter(db_task)
+                        session.add(u)
+                    await session.commit()
+                batch_total += len(batch)
+                logger.info(
+                    "utterances_batch_saved",
+                    protocol_id=str(protocol_id),
+                    batch_size=len(batch),
+                    total=batch_total,
+                )
+            except Exception as e:
+                logger.exception(
+                    "utterances_batch_save_failed",
+                    protocol_id=str(protocol_id),
+                    batch_size=len(batch),
+                    error=str(e),
+                )
+
+        # Main loop: забираем из очереди каждые 2 сек
+        while not stop_event.is_set():
+            batch = []
+            try:
+                while True:
+                    seg = self._utterance_queue.get_nowait()
+                    batch.append(seg)
+            except queue.Empty:
+                pass
+
+            await save_batch(batch)
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+
+        # Финальный flush — забираем всё, что осталось
+        leftover = []
+        try:
+            while True:
+                leftover.append(self._utterance_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        await save_batch(leftover)
+
+        if leftover:
+            logger.info(
+                "utterances_final_flush",
+                protocol_id=str(protocol_id),
+                count=len(leftover),
+                batch_total=batch_total,
+            )
+
+        return batch_total
+
+    async def _save_utterances(
+        self,
+        protocol_id: uuid.UUID,
+        segments_list: list,
+    ) -> int:
+        """Сохранить сегменты Whisper в таблицу utterance.
+
+        E129: без этого 298 (или сколько нашлось бы) реплик теряются.
+
+        - Удаляет старые utterance для этого protocol_id (перезапись при повторной транскрибации)
+        - Вставляет новые сегменты
+        - speaker_id остаётся None — диаризация проставит позже
+        - confidence из avg_logprob (если есть)
+
+        Возвращает число вставленных строк.
+        """
+        from decimal import Decimal
+        from sqlalchemy import delete
+        from app.db.session import AsyncSessionLocal
+        from app.db.models import Utterance
+
+        inserted = 0
+        async with AsyncSessionLocal() as session:
+            # Перезапись: старая транскрибация больше не актуальна
+            await session.execute(
+                delete(Utterance).where(Utterance.protocol_id == protocol_id)
+            )
+
+            for seg in segments_list:
+                text = (seg.text or "").strip()
+                if not text:
+                    continue  # пропускаем пустые
+
+                # avg_logprob → грубая оценка confidence (0..1)
+                conf = None
+                alp = getattr(seg, "avg_logprob", None)
+                if alp is not None:
+                    import math
+                    conf = Decimal(str(round(min(1.0, max(0.0, math.exp(alp))), 3)))
+
+                u = Utterance(
+                    protocol_id=protocol_id,
+                    speaker_id=None,
+                    start_sec=Decimal(str(round(float(seg.start), 3))),
+                    end_sec=Decimal(str(round(float(seg.end), 3))),
+                    text=text,
+                    text_original=text,
+                    confidence=conf,
+                    low_confidence=bool(
+                        conf is not None and conf < Decimal("0.4")
+                    ),
+                    important=False,
+                    corrected_by_llm=False,
+                )
+                session.add(u)
+                inserted += 1
+
+            await session.commit()
+
+        logger.info(
+            "utterances_saved",
+            protocol_id=str(protocol_id),
+            count=inserted,
+        )
+        return inserted
+
+    def get_status(self, task_id) -> TranscriptionStatus | None:
+        """Return in-memory status for a task, if it exists.
+
+        E120: метод отсутствовал — фронт всегда шёл в БД.
+        E123: без DB fallback (sync-функция не может вызывать asyncio.run
+              из работающего loop). Роутер сам делает DB fallback.
+        """
+        import uuid as _uuid
+        if isinstance(task_id, str):
+            try:
+                task_id = _uuid.UUID(task_id)
+            except (ValueError, TypeError):
                 return None
 
-            # Run async in sync wrapper
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Already in async context - skip DB lookup
-                    return None
-                else:
-                    return loop.run_until_complete(_load_from_db())
-            except RuntimeError:
-                # No event loop - run inline
-                return asyncio.run(_load_from_db())
-        except Exception as e:
-            logger.debug("db_status_load_failed", task_id=str(task_id), error=str(e))
+        status = self._tasks.get(task_id)
+        if status is None:
             return None
+
+        if status.status == "processing":
+            try:
+                from app.services.active_tasks import is_task_alive
+                if not is_task_alive(str(task_id)):
+                    status.status = "cancelled"
+                    status.message = status.message or "Отменено"
+            except Exception:
+                # active_tasks может отсутствовать в тестах — молча пропускаем
+                pass
+
+        return status
 
 
 # Singleton instance

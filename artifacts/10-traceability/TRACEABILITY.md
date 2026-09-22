@@ -272,3 +272,73 @@
 - E115: greenlet_spawn fix (AsyncSessionLocal)
 - E116: no circular imports
 - E117: NameError: name 'router' is not defined
+
+## US-081 — Потоковая запись реплик (E131/E132)
+
+### Frontend
+
+| Компонент | Файл | Строки | Что делает |
+|---|---|---|---|
+| `startProgressPolling` | `code/hmp-frontend/src/js/views/protocol.js` | 624-700 | Polling каждые 2 сек; подтягивает новые реплики при росте `segments_count` |
+| `updateProgressBar` | `code/hmp-frontend/src/js/views/protocol.js` | 660+ | Обновляет прогресс-бар с message |
+| `api.listUtterances(protocolId)` | `code/hmp-frontend/src/js/api/client.js` | 173 | Возвращает список реплик |
+
+### Backend
+
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `_utterance_queue: queue.Queue` | `app/services/transcription.py` | Thread-safe очередь для сегментов |
+| `_persist_utterances_loop` | `app/services/transcription.py` | Async loop, забирает batch каждые 2 сек, пишет в БД |
+| `utterances_task` | `app/services/transcription.py` | Запускается через `asyncio.create_task` в transcribe() |
+| `_run_transcribe_eager` | `app/services/transcription.py` | Worker thread кладёт `dict(start,end,text)` в queue |
+| `get_transcription_progress` | `app/routers/transcribe.py` | Считает `count(*) FROM utterance` для `segments_count` |
+
+### DB
+
+| Операция | Таблица | Когда |
+|---|---|---|
+| DELETE | utterance WHERE protocol_id=X | Перед стартом (перезапись) |
+| INSERT | utterance (batch) | Каждые 2 сек из `_persist_utterances_loop` |
+| INSERT | utterance (final flush) | После finally с timeout=15 сек |
+| SELECT count(*) | utterance | При каждом polling `/progress/{task_id}` |
+
+### Dataflow
+
+```
+Whisper generator (worker thread)
+        │
+        ├─ segments_list (in-memory)
+        └─ queue.put({start, end, text})            ← E131
+              │
+              ▼
+    _persist_utterances_loop (main event loop)
+    каждые 2 сек: drain → INSERT INTO utterance ...
+              │
+              ▼
+          PostgreSQL utterance
+              │
+              ▼
+    GET /progress/{task_id}
+        └─ count(*) FROM utterance WHERE protocol_id=X
+              │
+              ▼
+    Frontend polling
+        └─ if segCount > lastCount:
+              fetch /utterances?protocol_id=X → render
+```
+
+### Errors handled
+
+| E## | Симптом | Фикс |
+|---|---|---|
+| E131 | Сегменты терялись (один батч в конце) | queue.Queue + persist loop |
+| E132 | utterances_task не дожидался | await в finally с timeout=15 сек |
+
+### Тесты / Проверка
+
+End-to-end сценарий (для часовой записи):
+1. Запустить транскрибацию
+2. Через 5 сек — `segments_count=3` в БД
+3. Через 30 сек — `segments_count=25`
+4. Через 5 мин — `segments_count=50`
+5. После завершения — финальная перезагрузка → все 298 реплик

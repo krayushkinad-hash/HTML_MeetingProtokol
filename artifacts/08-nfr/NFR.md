@@ -686,3 +686,15 @@ docker run --network=none html_mp_app
 - **Следующий шаг:** `api-detail-designer` — REST API на основе NFR и модели данных.
 - **Зависимости:** Vision KPI (§6.2), Vision Ограничения (§9), Vision Риски (§8).
 - **Используется в:** `traceability-matrix` — каждое US привязано к NFR.
+
+## NFR-STREAM-1 (E131): Latency до первого текста
+
+**Метрика:** Время от старта транскрибации до момента, когда первая реплика появится в БД.
+
+**Требование:** ≤ 10 сек на CPU (base, tiny) и ≤ 5 сек на GPU (large-v3).
+
+**Достигается через:**
+- queue.Queue → persist_utterances_loop → DB INSERT каждые 2 сек
+- Frontend polling подтягивает новые через segments_count
+
+**Приоритет:** High (UX retention)
