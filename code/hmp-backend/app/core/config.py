@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # E111: VAD удаляет тишину, но иногда удаляет и речь.
     # По умолчанию OFF чтобы не терять данные.
     whisper_vad_filter: bool = False
+
+    # E118: VAD параметры (для тонкой настройки чувствительности)
+    vad_min_silence_duration_ms: int = 1000   # Минимальная пауза для обрезки
+    vad_speech_pad_ms: int = 300               # Padding вокруг речи
+    vad_threshold: float = 0.5                 # Speech probability threshold (0-1)
     whisper_beam_size: int = 1
     whisper_language: str = "ru"
 

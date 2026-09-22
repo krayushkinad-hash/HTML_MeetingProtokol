@@ -299,7 +299,18 @@ class TranscriptionService:
                     language=settings.whisper_language,
                     beam_size=settings.whisper_beam_size,
                     word_timestamps=False,  # faster
-                    vad_filter=settings.whisper_vad_filter,  # E111: configurable, default off
+                    # E118: Pass VAD parameters from settings
+                # Use only when VAD is enabled (default off to preserve all audio)
+                vad_filter=settings.whisper_vad_filter,
+                vad_parameters=(
+                    {
+                        "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                        "speech_pad_ms": settings.vad_speech_pad_ms,
+                        "threshold": settings.vad_threshold,
+                    }
+                    if settings.whisper_vad_filter
+                    else None
+                ),
                 )
 
                 # Estimate total duration from info
