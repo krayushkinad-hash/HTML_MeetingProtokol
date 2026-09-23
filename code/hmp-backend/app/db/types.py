@@ -26,9 +26,10 @@ class GUID(TypeDecorator):
     impl = CHAR
     cache_ok = True
 
-    def __init__(self, length=36, as_uuid=True, **kwargs):
+    # E212: параметр as_uuid убран — он не использовался.
+    # (process_bind_param/process_result_value всегда возвращали uuid.UUID)
+    def __init__(self, length=36, **kwargs):
         super().__init__(length=length, **kwargs)
-        self.as_uuid = as_uuid
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":

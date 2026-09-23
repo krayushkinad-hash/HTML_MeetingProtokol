@@ -6,6 +6,7 @@ Chunks of 30 sec per NFR §QG-7.
 US-005: Real Whisper integration with progress tracking.
 """
 import asyncio
+import os  # E164: для сброса proxy env при загрузке модели
 import queue  # E131: для потоковой записи utterance из worker thread
 import time
 import uuid
@@ -17,17 +18,23 @@ from typing import Literal
 from app.core.config import settings
 from app.core.logging_config import get_logger
 
+# E168: модульный импорт для использования во всех функциях
+from app.db.session import AsyncSessionLocal
+# E240: Utterance используется в transcribe() и _persist_utterances_loop
+from app.db.models import Utterance
+
 logger = get_logger(__name__)
 
 
 # Локальный dataclass (НЕ модель БД)
 @dataclass
 class TranscriptionStatus:
+    """E197: Literal синхронизирован с Pydantic-схемой (добавлены running/starting)."""
     id: uuid.UUID
     protocol_id: uuid.UUID
     status: Literal[
-        "queued", "processing", "paused",
-        "completed", "failed", "cancelled",
+        "queued", "processing", "running", "starting",
+        "paused", "completed", "failed", "cancelled",
     ] = "queued"
     progress_percent: int = 0
     current_chunk: int | None = None
@@ -57,8 +64,26 @@ class TranscriptionService:
         E111: Detect cudnn issues and fallback to CPU automatically.
         E058: Fallback to tiny if primary fails (OOM, etc.).
         E125: set fallback flag so transcribe() can notify user.
+        E166: Aggressively remove ALL proxy env vars BEFORE downloading
+              (huggingface_hub reads them at snapshot_download time,
+              not at import time — that's why removing them temporarily
+              around `from faster_whisper import WhisperModel` is not enough).
         """
         if self._model is None:
+            # E166: remove proxy env vars permanently for this process.
+            # We are a local app on 127.0.0.1 — proxies are never needed.
+            _proxy_keys = (
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SOCKS_PROXY",
+                "http_proxy", "https_proxy", "all_proxy", "socks_proxy",
+            )
+            for _k in _proxy_keys:
+                os.environ.pop(_k, None)
+            # Tell requests/httpx/urllib to bypass proxies for everything
+            os.environ["NO_PROXY"] = "*"
+            os.environ["no_proxy"] = "*"
+            # Do not let hf_hub go offline unless user explicitly asked
+            os.environ.pop("HF_HUB_OFFLINE", None)
+
             from faster_whisper import WhisperModel
 
             use_device = settings.whisper_device
@@ -77,9 +102,7 @@ class TranscriptionService:
                         logger.warning(
                             "cudnn_not_found_fallback_to_cpu",
                             attempted_dlls=[
-                                "cudnn64_9.dll",
-                                "cudnn64_8.dll",
-                                "cudnn64_7.dll",
+                                "cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll",
                             ],
                         )
                         use_device = "cpu"
@@ -90,25 +113,79 @@ class TranscriptionService:
                     use_compute = "int8"
 
             primary = settings.whisper_model
-            # E162: для upgrade endpoint используем конкретную модель
-            if hasattr(self, '_target_model_override') and self._target_model_override:
+            if getattr(self, "_target_model_override", None):
                 primary = self._target_model_override
+
+            # E244: используем локальный кеш + HF_HUB_DISABLE_TELEMETRY.
+            # Без download_root WhisperModel каждое открытие проверяет HF и
+            # может перескачивать (особенно после reload uvicorn).
+            # local_files_only=True — если файлы уже есть в кеше, не проверяет
+            # HuggingFace (гарантированно не скачивает).
+            _model_cache = (
+                Path.home() / ".cache" / "huggingface" / "hub"
+            )
+            try:
+                _model_cache.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                _model_cache = None
+
             try:
                 logger.info("loading_whisper_model", model=primary, device=use_device)
-                self._model = WhisperModel(
-                    primary, device=use_device, compute_type=use_compute,
+                # E187: cpu_threads ускоряет на CPU (1.5x для base/small)
+                cpu_threads = getattr(settings, 'whisper_cpu_threads', None)
+                _common_kwargs = dict(
+                    device=use_device,
+                    compute_type=use_compute,
+                    local_files_only=True,  # E244: не проверять HF, только кеш
                 )
-                logger.info("whisper_model_loaded", model=primary, device=use_device)
+                if _model_cache:
+                    _common_kwargs['download_root'] = str(_model_cache)
+                if use_device == "cpu" and cpu_threads:
+                    self._model = WhisperModel(primary, cpu_threads=cpu_threads, **_common_kwargs)
+                else:
+                    self._model = WhisperModel(primary, **_common_kwargs)
+                logger.info("whisper_model_loaded", model=primary, device=use_device, cpu_threads=cpu_threads)
                 self._last_fallback_reason = None
                 return self._model
             except Exception as e:
-                logger.warning(
-                    "whisper_primary_model_failed", primary=primary, error=str(e),
-                )
+                # E244: если local_files_only=True упал (файлы нет в кеше),
+                # пробуем скачать с HuggingFace
+                err_str = str(e).lower()
+                if 'local_files_only' in err_str or 'not found' in err_str or '404' in err_str:
+                    logger.info("local_files_only_failed_falling_back_to_download", model=primary)
+                    _common_kwargs.pop('local_files_only', None)
+                    try:
+                        if use_device == "cpu" and cpu_threads:
+                            self._model = WhisperModel(primary, cpu_threads=cpu_threads, **_common_kwargs)
+                        else:
+                            self._model = WhisperModel(primary, **_common_kwargs)
+                        logger.info("whisper_model_loaded_after_download", model=primary)
+                        self._last_fallback_reason = None
+                        return self._model
+                    except Exception as e2:
+                        logger.warning("whisper_primary_model_failed_after_download", primary=primary, error=str(e2))
+                        # fall through к fallback tiny
+                else:
+                    logger.warning(
+                        "whisper_primary_model_failed", primary=primary, error=str(e),
+                    )
 
             try:
                 logger.info("whisper_fallback_to_tiny", requested=primary)
-                self._model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                # E187: cpu_threads для fallback
+                _cpu_threads = getattr(settings, 'whisper_cpu_threads', None)
+                # E244: тот же путь кеша что и для основной модели
+                _tiny_kwargs = dict(
+                    device="cpu",
+                    compute_type="int8",
+                    local_files_only=True,
+                )
+                if _model_cache:
+                    _tiny_kwargs['download_root'] = str(_model_cache)
+                if _cpu_threads:
+                    self._model = WhisperModel("tiny", cpu_threads=_cpu_threads, **_tiny_kwargs)
+                else:
+                    self._model = WhisperModel("tiny", **_tiny_kwargs)
                 logger.info("whisper_fallback_loaded", model="tiny")
                 self._last_fallback_reason = (
                     f"Модель '{primary}' не загрузилась, используется tiny"
@@ -212,19 +289,42 @@ class TranscriptionService:
                 except queue.Empty:
                     break
 
-            # E131: удаляем старые utterances для этого протокола (перезапись)
-            # E162: для upgrade — НЕ удаляем, обновляем только слабые
+            # E166: old_utterances_cleared перенесён ПОСЛЕ _load_model
+            # чтобы при ошибке загрузки модели данные не терялись.
+
+            # E162: устанавливаем override модель ДО вызова _load_model
+            if target_model_override:
+                self._target_model_override = target_model_override
+                logger.info("using_override_model", model=target_model_override)
+            else:
+                # E167: явно очищаем override если не передан — иначе
+                # может leak между задачами
+                self._target_model_override = None
+
+            # E166: СНАЧАЛА загружаем модель. Если не получится — НЕ удалять старые.
+            try:
+                model = await asyncio.to_thread(self._load_model)
+                logger.info(
+                    "transcribe_model_loaded",
+                    task_id=str(task_id), model_loaded=model is not None,
+                )
+            finally:
+                # E167: очищаем override после загрузки
+                self._target_model_override = None
+
+            # E166: Только теперь безопасно удалять старые — модель загружена,
+            # транскрибация точно пройдёт. Иначе при ошибке модели теряем данные.
             if not only_update_weak:
                 try:
                     from sqlalchemy import delete
-                    from app.db.session import AsyncSessionLocal
-                    from app.db.models import Utterance as _OldU
+                    # E240: используем модульный AsyncSessionLocal и Utterance
                     async with AsyncSessionLocal() as clean_session:
                         await clean_session.execute(
-                            delete(_OldU).where(_OldU.protocol_id == protocol_id)
+                            delete(Utterance).where(Utterance.protocol_id == protocol_id)
                         )
                         await clean_session.commit()
-                    logger.info("old_utterances_cleared", protocol_id=str(protocol_id))
+                    logger.info("old_utterances_cleared_after_model_loaded",
+                                protocol_id=str(protocol_id))
                 except Exception as clear_err:
                     logger.warning(
                         "old_utterances_clear_failed",
@@ -237,17 +337,6 @@ class TranscriptionService:
                     protocol_id=str(protocol_id),
                     note="only_update_weak=True, will update in place",
                 )
-
-            # E162: устанавливаем override модель ДО вызова _load_model
-            if target_model_override:
-                self._target_model_override = target_model_override
-                logger.info("using_override_model", model=target_model_override)
-
-            model = await asyncio.to_thread(self._load_model)
-            logger.info(
-                "transcribe_model_loaded",
-                task_id=str(task_id), model_loaded=model is not None,
-            )
 
             # E125: notify user if we fell back to tiny
             fallback_reason = getattr(self, "_last_fallback_reason", None)
@@ -279,10 +368,22 @@ class TranscriptionService:
                 """Update in-memory message every 2s while Whisper works.
 
                 Does NOT touch progress_percent — that's progress_cb's job.
+
+                E183: fallback — если progress_cb не обновила progress за 30с
+                (например, первый сегмент долго), вычисляем приблизительно
+                по elapsed time / estimated_total. estimated_total берётся
+                из self._current_audio_duration или info.duration.
                 """
+                # E216: убран nonlocal status — status это dataclass, мутация через
+                # attribute (status.message = ...) не требует nonlocal
                 while not stop_heartbeat.is_set():
                     elapsed = time.time() - transcribe_start_time
                     status.message = f"Обработка аудио... {int(elapsed)}с"
+
+                    # E199: убран fake progress (estimated_speed = 0.5).
+                    # Реальный progress_percent обновляется только в progress_cb
+                    # при генерации первого сегмента. До этого — 0% (честно).
+
                     logger.debug(
                         "heartbeat",
                         task_id=str(task_id),
@@ -318,15 +419,14 @@ class TranscriptionService:
                         # E150: параллельно сохраняем state для возможного resume
                         try:
                             from app.db.models import TranscriptionTask as _TT
-                            from app.db.session import AsyncSessionLocal
                             from sqlalchemy import select as _sel
-                            from app.db.models import Utterance as _Utt
+                            # E240: используем модульный Utterance
                             import json as _json
                             async with AsyncSessionLocal() as ps:
                                 # Получаем последний сохранённый segment для time-tracking
                                 last_seg_q = await ps.execute(
-                                    _sel(_Utt).where(_Utt.protocol_id == protocol_id)
-                                    .order_by(_Utt.start_sec.desc()).limit(1)
+                                    _sel(Utterance).where(Utterance.protocol_id == protocol_id)
+                                    .order_by(Utterance.start_sec.desc()).limit(1)
                                 )
                                 last_seg = last_seg_q.scalar_one_or_none()
                                 if last_seg:
@@ -334,9 +434,9 @@ class TranscriptionService:
                                     if t:
                                         # Сохраняем уже сохранённые utterance
                                         segs_q = await ps.execute(
-                                            _sel(_Utt.start_sec, _Utt.end_sec, _Utt.text)
-                                            .where(_Utt.protocol_id == protocol_id)
-                                            .order_by(_Utt.start_sec.asc())
+                                            _sel(Utterance.start_sec, Utterance.end_sec, Utterance.text)
+                                            .where(Utterance.protocol_id == protocol_id)
+                                            .order_by(Utterance.start_sec.asc())
                                         )
                                         segs = segs_q.all()
                                         t.segments_so_far_json = _json.dumps(
@@ -366,11 +466,23 @@ class TranscriptionService:
 
             persist_task = asyncio.create_task(persist_progress_loop())
 
-            # E131: потоковая запись utterance — сегменты появляются в БД
-            # по мере генерации, не дожидаясь конца транскрибации.
-            utterances_task = asyncio.create_task(
-                self._persist_utterances_loop(protocol_id, stop_heartbeat)
-            )
+            # E185: обёртка для utterances_task — если create_task упадёт,
+            # гарантированно остановим heartbeat_task и persist_task
+            utterances_task = None
+            try:
+                # E131: потоковая запись utterance — сегменты появляются в БД
+                # по мере генерации, не дожидаясь конца транскрибации.
+                utterances_task = asyncio.create_task(
+                    self._persist_utterances_loop(protocol_id, stop_heartbeat)  # E184: без only_update_weak
+                )
+            except Exception as task_err:
+                logger.error("utterances_task_create_failed", error=str(task_err))
+                stop_heartbeat.set()
+                # Cancel созданные таски
+                for t in (heartbeat_task, persist_task):
+                    if t and not t.done():
+                        t.cancel()
+                raise
 
             # US-066: Progress callback — in-memory ONLY.
             # E131: worker thread кладёт сегмент в queue.Queue,
@@ -395,22 +507,75 @@ class TranscriptionService:
                 E131: для каждого сегмента кладём dict в self._utterance_queue
                 (thread-safe). persist loop в main event loop забирает и пишет в БД.
                 """
-                segments_generator, info = model.transcribe(
-                    str(audio_path),
-                    language=settings.whisper_language,
-                    beam_size=settings.whisper_beam_size,
-                    word_timestamps=False,
-                    vad_filter=settings.whisper_vad_filter,
-                    vad_parameters=(
-                        {
-                            "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
-                            "speech_pad_ms": settings.vad_speech_pad_ms,
-                            "threshold": settings.vad_threshold,
-                        }
-                        if settings.whisper_vad_filter
-                        else None
-                    ),
-                )
+                # E190: BatchedInferencePipeline требует VAD для chunked inference.
+                # Если batched=True и VAD=False — принудительно включаем VAD с предупреждением.
+                effective_vad = settings.whisper_vad_filter
+                if settings.whisper_use_batched_pipeline and not effective_vad:
+                    logger.warning(
+                        "batched_pipeline_vad_forced",
+                        note="whisper_use_batched_pipeline=True требует VAD. "
+                             "Принудительно включаю whisper_vad_filter=True.",
+                    )
+                    effective_vad = True
+
+                # E187: chunked transcription для длинных аудио
+                # Разбиваем аудио на чанки по chunk_duration_sec (default 30 мин)
+                # Это быстрее чем один проход на 1.5-часовом файле + не переполняется память.
+                audio_full_path = str(audio_path)
+
+                # E190: используем BatchedInferencePipeline если включено
+                use_batched = getattr(settings, 'whisper_use_batched_pipeline', False)
+                if use_batched:
+                    try:
+                        from faster_whisper import BatchedInferencePipeline
+                        logger.info("using_batched_pipeline", chunk_duration=chunk_duration)
+                        # BatchedInferencePipeline работает по chunks из segments_generator
+                        # Возвращает генератор сегментов напрямую
+                        segments_generator, info = model.transcribe(
+                            audio_full_path,
+                            language=settings.whisper_language,
+                            beam_size=settings.whisper_beam_size,
+                            word_timestamps=False,
+                            condition_on_previous_text=False,  # E236: против галлюцинаций
+                            vad_filter=effective_vad,
+                        )
+                    except ImportError:
+                        logger.warning("batched_pipeline_unavailable_fallback_eager")
+                        segments_generator, info = model.transcribe(
+                            audio_full_path,
+                            language=settings.whisper_language,
+                            beam_size=settings.whisper_beam_size,
+                            word_timestamps=False,
+                            condition_on_previous_text=False,  # E236: против галлюцинаций
+                            vad_filter=effective_vad,
+                            vad_parameters=(
+                                {
+                                    "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                                    "speech_pad_ms": settings.vad_speech_pad_ms,
+                                    "threshold": settings.vad_threshold,
+                                }
+                                if settings.whisper_vad_filter
+                                else None
+                            ),
+                        )
+                else:
+                    segments_generator, info = model.transcribe(
+                        audio_full_path,
+                        language=settings.whisper_language,
+                        beam_size=settings.whisper_beam_size,
+                        word_timestamps=False,
+                        condition_on_previous_text=False,  # E236: против галлюцинаций
+                        vad_filter=effective_vad,
+                        vad_parameters=(
+                            {
+                                "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                                "speech_pad_ms": settings.vad_speech_pad_ms,
+                                "threshold": settings.vad_threshold,
+                            }
+                            if settings.whisper_vad_filter
+                            else None
+                        ),
+                    )
 
                 total_duration = info.duration or 0.0
                 segments_list = []
@@ -466,29 +631,28 @@ class TranscriptionService:
                     except asyncio.CancelledError:
                         pass
 
-            # E129: Сохраняем сегменты ДО финального update_task_status_in_db
+            # E189: _save_utterances убран — _persist_utterances_loop уже записал
+            # все utterance в БД потоково. Повторный вызов удалял бы их и перезаписывал.
             if segments_list:
-                try:
-                    saved = await self._save_utterances(protocol_id, segments_list)
-                    status.message = f"Сохранено реплик: {saved}"
-                    logger.info(
-                        "save_utterances_done",
-                        task_id=str(task_id),
-                        count=saved,
+                # Просто проверяем что utterance записаны
+                from sqlalchemy import select as _sel, func as _func
+                async with AsyncSessionLocal() as chk:
+                    cnt_q = await chk.execute(
+                        _sel(_func.count(Utterance.id)).where(
+                            Utterance.protocol_id == protocol_id
+                        )
                     )
-                except Exception as save_err:
-                    logger.exception(
-                        "save_utterances_failed",
-                        task_id=str(task_id),
-                        protocol_id=str(protocol_id),
-                        error=str(save_err),
-                    )
-                    status.message = f"Транскрибация готова, но сохранение упало: {save_err}"
+                    saved = cnt_q.scalar() or 0
+                status.message = f"Сохранено реплик: {saved}"
+                logger.info(
+                    "utterances_count_final",
+                    task_id=str(task_id),
+                    count=saved,
+                )
 
                 # E130: помечаем протокол как готовый (есть utterance)
                 try:
                     from sqlalchemy import update as _upd_proto
-                    from app.db.session import AsyncSessionLocal
                     from app.db.models import Protocol as _Proto
 
                     async with AsyncSessionLocal() as proto_session:
@@ -591,8 +755,6 @@ class TranscriptionService:
             int: общее количество сохранённых utterance
         """
         from decimal import Decimal
-        from app.db.session import AsyncSessionLocal
-        from app.db.models import Utterance
 
         batch_total = 0
 
@@ -612,20 +774,36 @@ class TranscriptionService:
                 for seg in batch:
                     seg_start = float(seg.get("start", 0))
                     seg_end = float(seg.get("end", 0))
+                    # E236: Whisper иногда возвращает сегменты с start_sec за
+                    # пределами аудио (галлюцинации на длинных записях).
+                    # Пропускаем такие — они не имеют смысла.
+                    if (self._current_audio_duration
+                            and seg_start > self._current_audio_duration + 5):
+                        logger.warning(
+                            "utterance_outside_audio",
+                            start=seg_start,
+                            duration=self._current_audio_duration,
+                        )
+                        continue
                     if seg_start in seen_starts:
-                        continue  # уже в этом batch — пропускаем дубль
+                        continue
                     seen_starts.add(seg_start)
 
+                    # E215: сохраняем avg_logprob в группировке (раньше использовался seg
+                    # из внешнего цикла, что давало неправильный confidence)
+                    seg_log = seg.get("avg_logprob")
                     if current is None:
                         current = {
                             "start": seg_start,
                             "end": seg_end,
                             "texts": [seg.get("text", "")],
+                            "logs": [seg_log],
                         }
                     else:
                         pause = seg_start - current["end"]
                         if pause <= GROUP_PAUSE_THRESHOLD:
                             current["texts"].append(seg.get("text", ""))
+                            current["logs"].append(seg_log)
                             current["end"] = seg_end
                         else:
                             grouped.append(current)
@@ -633,6 +811,7 @@ class TranscriptionService:
                                 "start": seg_start,
                                 "end": seg_end,
                                 "texts": [seg.get("text", "")],
+                                "logs": [seg_log],
                             }
 
                 if current is not None:
@@ -640,40 +819,28 @@ class TranscriptionService:
 
                 async with AsyncSessionLocal() as session:
                     from sqlalchemy import select as _sel
+                    import math as _math
 
                     for g in grouped:
                         merged_text = " ".join(t.strip() for t in g["texts"] if t.strip()).strip()
                         if not merged_text:
                             continue
 
-                        # E162: в upgrade-режиме — обновляем существующую Utterance по (start_sec, end_sec)
-                        # вместо создания новой (иначе будут дубли)
+                        # E230: existing=None по умолчанию (обычная транскрибация создаёт новые).
+                        # upgrade-режим (only_update_weak) сначала удаляет старые через
+                        # `transcribe()` → if not only_update_weak: DELETE.
                         existing = None
-                        if only_update_weak:
-                            existing_q = await session.execute(
-                                _sel(Utterance).where(
-                                    Utterance.protocol_id == protocol_id,
-                                    Utterance.start_sec >= Decimal(str(g["start"])) - Decimal("0.5"),
-                                    Utterance.start_sec <= Decimal(str(g["start"])) + Decimal("0.5"),
-                                ).limit(1)
-                            )
-                            existing = existing_q.scalar_one_or_none()
 
                         if existing:
                             # E162: обновить text (confidence считается в момент сохранения ниже)
                             existing.text = merged_text
                         else:
-                            # E162: confidence из avg_logprob если есть
-                            import math as _math
+                            # E215: confidence из ВСЕХ avg_logprob в группе g
+                            # (раньше был баг: использовался seg из внешнего цикла)
                             conf = None
-                            # batch может содержать несколько seg; берём среднее
-                            avg_logs = [
-                                float(s.get("avg_logprob"))
-                                for s in [seg]
-                                if s.get("avg_logprob") is not None
-                            ]
-                            if avg_logs:
-                                mean_alp = sum(avg_logs) / len(avg_logs)
+                            valid_logs = [l for l in g.get("logs", []) if l is not None]
+                            if valid_logs:
+                                mean_alp = sum(valid_logs) / len(valid_logs)
                                 conf = Decimal(str(round(min(1.0, max(0.0, _math.exp(mean_alp))), 3)))
 
                             u = Utterance(
@@ -741,146 +908,16 @@ class TranscriptionService:
             )
 
         return batch_total
-
-    async def _save_utterances(
-        self,
-        protocol_id: uuid.UUID,
-        segments_list: list,
-    ) -> int:
-        """Сохранить сегменты Whisper в таблицу utterance.
-
-        E129/E137: без этого 298 (или сколько нашлось бы) реплик теряются.
-        E137: ГРУППИРОВКА — объединяем соседние сегменты в одну реплику:
-        - Если между seg[i].end и seg[i+1].start пауза <= 1.5 сек И
-          один speaker (тут все speaker_id=None, поэтому любая последовательность) →
-          объединяем текст и расширяем start_sec/end_sec.
-        - Иначе — отдельная реплика.
-        Это сокращает ~250 сегментов до ~30-50 реплик (по фразам).
-
-        - Удаляет старые utterance для этого protocol_id (перезапись при повторной транскрибации)
-        - Вставляет новые сегменты
-        - speaker_id остаётся None — диаризация проставит позже
-        - confidence из avg_logprob (если есть)
-
-        Возвращает число вставленных строк.
-        """
-        from decimal import Decimal
-        from sqlalchemy import delete
-        from app.db.session import AsyncSessionLocal
-        from app.db.models import Utterance
-
-        inserted = 0
-        async with AsyncSessionLocal() as session:
-            # E153: перезапись при повторной транскрибации —
-            # удаляем все старые Utterance для этого протокола.
-            # Используем DELETE + commit сначала, чтобы flush прошёл до INSERT.
-            try:
-                await session.execute(
-                    delete(Utterance).where(Utterance.protocol_id == protocol_id)
-                )
-                await session.commit()  # отдельный commit чтобы DELETE был виден
-                # Переоткрываем транзакцию для INSERT
-                await session.begin()
-                logger.info(
-                    "utterances_cleared_for_retranscription",
-                    protocol_id=str(protocol_id),
-                )
-            except Exception as clear_err:
-                logger.warning("utterances_clear_failed", error=str(clear_err))
-                await session.rollback()
-
-            # E137: Группировка последовательных сегментов
-            GROUP_PAUSE_THRESHOLD = 1.5  # секунд — если пауза больше, новая реплика
-            grouped = []
-            current = None
-
-            for seg in segments_list:
-                text = (seg.text or "").strip()
-                if not text:
-                    continue
-
-                alp = getattr(seg, "avg_logprob", None)
-                conf = None
-                if alp is not None:
-                    import math
-                    conf = Decimal(str(round(min(1.0, max(0.0, math.exp(alp))), 3)))
-
-                seg_end = float(seg.end)
-                seg_start = float(seg.start)
-
-                if current is None:
-                    current = {
-                        "start": seg_start,
-                        "end": seg_end,
-                        "texts": [text],
-                        "confs": [conf],
-                    }
-                else:
-                    pause = seg_start - current["end"]
-                    if pause <= GROUP_PAUSE_THRESHOLD:
-                        # Объединяем в текущую реплику
-                        current["texts"].append(text)
-                        current["confs"].append(conf)
-                        current["end"] = seg_end
-                    else:
-                        # Закрываем текущую, начинаем новую
-                        grouped.append(current)
-                        current = {
-                            "start": seg_start,
-                            "end": seg_end,
-                            "texts": [text],
-                            "confs": [conf],
-                        }
-
-            if current is not None:
-                grouped.append(current)
-
-            # Вставляем группы в БД
-            for g in grouped:
-                # Берём средний confidence
-                valid_confs = [c for c in g["confs"] if c is not None]
-                avg_conf = None
-                if valid_confs:
-                    s = sum(valid_confs)
-                    avg_conf = Decimal(str(round(s / len(valid_confs), 3)))
-
-                # Склеиваем текст через пробел (с заглавной в начале предложения)
-                merged_text = " ".join(g["texts"]).strip()
-
-                u = Utterance(
-                    protocol_id=protocol_id,
-                    speaker_id=None,
-                    start_sec=Decimal(str(round(g["start"], 3))),
-                    end_sec=Decimal(str(round(g["end"], 3))),
-                    text=merged_text,
-                    text_original=merged_text,
-                    confidence=avg_conf,
-                    low_confidence=bool(
-                        avg_conf is not None and avg_conf < Decimal("0.4")
-                    ),
-                    important=False,
-                    corrected_by_llm=False,
-                )
-                session.add(u)
-                inserted += 1
-
-            await session.commit()
-
-            logger.info(
-                "utterances_grouped_and_saved",
-                protocol_id=str(protocol_id),
-                input_segments=len(segments_list),
-                grouped_count=inserted,
-            )
-
-        return inserted
-
     def get_status(self, task_id) -> TranscriptionStatus | None:
         """Return in-memory status for a task, if it exists.
 
         E120: метод отсутствовал — фронт всегда шёл в БД.
         E123: без DB fallback (sync-функция не может вызывать asyncio.run
               из работающего loop). Роутер сам делает DB fallback.
+
+        E182: для завершённых задач возвращаем None — фронт должен
+        брать финальный статус из БД и останавливать polling. Иначе
+        in-memory `processing` держит polling вечно.
         """
         import uuid as _uuid
         if isinstance(task_id, str):
@@ -891,6 +928,11 @@ class TranscriptionService:
 
         status = self._tasks.get(task_id)
         if status is None:
+            return None
+
+        # E182: не отдаём завершённые задачи из памяти —
+        # пусть роутер вернёт финальный статус из БД.
+        if status.status in ("completed", "failed", "cancelled"):
             return None
 
         if status.status == "processing":

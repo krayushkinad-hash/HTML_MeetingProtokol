@@ -204,11 +204,13 @@ async function renderTranscriptionTab(content) {
                 <label>Модель Whisper</label>
                 <select class="input" id="setting-whisper-model">
                     <option value="tiny" ${settings?.whisper_model === 'tiny' ? 'selected' : ''}>Tiny (75 MB, быстро)</option>
-                    <option value="base" ${settings?.whisper_model === 'base' ? 'selected' : ''}>Base (140 MB)</option>
+                    <!-- E184/E220: base — default (НЕ large-v3). UI синхронизирован с backend. -->
+                    <option value="base" ${(!settings?.whisper_model || settings?.whisper_model === 'base') ? 'selected' : ''}>Base (140 MB)</option>
                     <option value="small" ${settings?.whisper_model === 'small' ? 'selected' : ''}>Small (460 MB)</option>
                     <option value="medium" ${settings?.whisper_model === 'medium' ? 'selected' : ''}>Medium (1.5 GB)</option>
                     <option value="large-v2" ${settings?.whisper_model === 'large-v2' ? 'selected' : ''}>Large-v2 (3 GB)</option>
-                    <option value="large-v3" ${(!settings?.whisper_model || settings?.whisper_model === 'large-v3') ? 'selected' : ''}>Large-v3 (3 GB, лучшее качество)</option>
+                    <!-- E220: large-v3 — НЕ default, только по явному выбору -->
+                    <option value="large-v3" ${settings?.whisper_model === 'large-v3' ? 'selected' : ''}>Large-v3 (3 GB, лучшее качество)</option>
                 </select>
 
                 <!-- US-058: Quick model status + download + manager buttons -->
@@ -247,18 +249,110 @@ async function renderTranscriptionTab(content) {
                 <input type="checkbox" id="setting-gpu" ${settings?.use_gpu ? 'checked' : ''}>
                 <span class="form-help">Ускоряет обработку в 5-10 раз</span>
             </div>
+
+            <!-- E251: выбор источника Whisper (локально или удалённый сервер) -->
+            <div class="form-group">
+                <label>Источник транскрипции</label>
+                <select class="input" id="setting-whisper-source">
+                    <option value="local" ${settings?.whisper_remote_enabled !== true ? 'selected' : ''}>
+                        Локальный Whisper (на этой машине)
+                    </option>
+                    <option value="remote" ${settings?.whisper_remote_enabled === true ? 'selected' : ''}>
+                        Удалённый Whisper-сервер
+                    </option>
+                </select>
+                <span class="form-help">Удалённый сервер разгружает CPU. Используйте если установлен отдельный Whisper.</span>
+            </div>
+            <div id="whisper-remote-fields" style="display:none;">
+                <div class="form-group">
+                    <label>URL удалённого Whisper</label>
+                    <input type="text" id="setting-whisper-remote-url" class="input"
+                        placeholder="http://195.133.77.76:8000"
+                        value="${escapeHtml((settings?.whisper_remote_url) || '')}">
+                    <span class="form-help">Например: http://195.133.77.76:8000</span>
+                </div>
+                <div class="form-group">
+                    <label>Endpoint путь</label>
+                    <input type="text" id="setting-whisper-remote-path" class="input"
+                        placeholder="/transcribe"
+                        value="${escapeHtml((settings?.whisper_remote_path) || '/transcribe')}">
+                </div>
+                <div class="form-group">
+                    <button class="btn" id="btn-test-whisper-remote">
+                        <i class="fa-solid fa-plug"></i> Проверить подключение
+                    </button>
+                    <span id="whisper-remote-status" class="form-help" style="margin-left:8px;"></span>
+                </div>
+                <div class="form-group">
+                    <!-- E284: кнопка ТЕСТ с реальным файлом test.mp3 -->
+                    <label style="display:block; margin-bottom:6px; font-family:monospace; font-size:11px; color:#0f0;">
+                        Файл: C:\Users\User\Downloads\test.mp3
+                    </label>
+                    <input type="file" id="hardcoded-test-file" accept="audio/*,video/*"
+                           style="display:block; margin-bottom:6px; max-width:320px;">
+                    <button class="btn btn-warning" id="btn-hardcoded-test">
+                        <i class="fa-solid fa-bolt"></i> ТЕСТ (отправить файл на remote)
+                    </button>
+                    <pre id="hardcoded-test-status"
+                         class="form-help"
+                         style="margin-left:8px; margin-top:8px; padding:8px; background:#1e1e1e; color:#0f0; font-size:11px; max-height:240px; overflow:auto;"></pre>
+                </div>
+            </div>
+
             <button class="btn btn-primary" id="btn-save-transcription">Сохранить</button>
         </div>
     `;
 
     content.querySelector('#btn-save-transcription')?.addEventListener('click', () => {
+        const sourceSel = content.querySelector('#setting-whisper-source');
+        const remoteUrlInp = content.querySelector('#setting-whisper-remote-url');
+        const remotePathInp = content.querySelector('#setting-whisper-remote-path');
+
         saveSettings(content, {
             whisper_model: content.querySelector('#setting-whisper-model').value,
             default_language: content.querySelector('#setting-language').value,
             use_gpu: content.querySelector('#setting-gpu').checked,
+            // E251: выбор источника + remote URL
+            whisper_remote_enabled: sourceSel && sourceSel.value === 'remote',
+            whisper_remote_url: remoteUrlInp ? remoteUrlInp.value.trim() : '',
+            whisper_remote_path: remotePathInp ? remotePathInp.value.trim() || '/transcribe' : '/transcribe',
         });
     });
- 
+
+    // E251: показать/скрыть поля удалённого сервера в зависимости от выбора
+    const sourceSel2 = content.querySelector('#setting-whisper-source');
+    const remoteFields = content.querySelector('#whisper-remote-fields');
+    function updateRemoteFieldsVisibility() {
+        if (!sourceSel2 || !remoteFields) return;
+        remoteFields.style.display = sourceSel2.value === 'remote' ? '' : 'none';
+    }
+    updateRemoteFieldsVisibility();
+    sourceSel2?.addEventListener('change', updateRemoteFieldsVisibility);
+
+    // E251: проверить подключение к удалённому Whisper
+    content.querySelector('#btn-test-whisper-remote')?.addEventListener('click', async () => {
+        const url = content.querySelector('#setting-whisper-remote-url').value.trim();
+        const statusEl = content.querySelector('#whisper-remote-status');
+        if (!url) {
+            statusEl.textContent = '❌ Укажите URL';
+            statusEl.style.color = 'var(--danger, #dc2626)';
+            return;
+        }
+        statusEl.textContent = '⏳ Проверяю…';
+        statusEl.style.color = 'var(--text-secondary, #5a6470)';
+        try {
+            const r = await fetch(url.replace(/\/$/, '') + '/health', {
+                method: 'GET',
+                signal: AbortSignal.timeout(8000),
+            });
+            const data = await r.json();
+            statusEl.textContent = `✅ OK: ${data.status || ''} ${data.model_name ? '(' + data.model_name + ')' : ''}`;
+            statusEl.style.color = 'var(--success, #16a34a)';
+        } catch (e) {
+            statusEl.textContent = '❌ ' + (e.message || 'недоступен');
+            statusEl.style.color = 'var(--danger, #dc2626)';
+        }
+    });
 
     // US-058: Whisper Models Manager button + status (E060b: wrapped in try-catch)
     try {
@@ -271,6 +365,59 @@ async function renderTranscriptionTab(content) {
     } catch (e) {
         console.warn('whisper manager button init failed:', e);
     }
+
+    // E289: ТЕСТ с реальным файлом — отправляет напрямую на remote (минуя backend)
+    // Объявляем переменные ОДИН РАЗ для обоих хендлеров (TEST hardcoded и cancel)
+    const hardcodedFileInput = content.querySelector('#hardcoded-test-file');
+    const hardcodedTestBtn = content.querySelector('#btn-hardcoded-test');
+    const hardcodedStatusEl = content.querySelector('#hardcoded-test-status');
+
+    if (hardcodedTestBtn && hardcodedStatusEl && hardcodedFileInput) {
+        hardcodedTestBtn.addEventListener('click', async () => {
+            const file = hardcodedFileInput.files[0];
+            if (!file) {
+                hardcodedStatusEl.textContent = '❌ Сначала выберите файл через поле выше';
+                return;
+            }
+
+            const form = new FormData();
+            // E289: отправляем напрямую на remote — минуя ваш backend (обход CORS через VPS)
+            form.append('file', file);
+            form.append('model', 'base');
+            form.append('language', 'ru');
+            form.append('beam_size', '1');
+
+            const ts = new Date().toISOString();
+            const fileMb = (file.size / (1024 * 1024)).toFixed(2);
+            hardcodedStatusEl.textContent =
+                `[${ts}] POST http://195.133.77.76:8000/transcribe\n` +
+                `(напрямую из браузера)\n` +
+                `file: ${file.name} (${fileMb} МБ)\n` +
+                `model: base, language: ru\n\n` +
+                `...отправка...`;
+
+            try {
+                const r = await fetch('http://195.133.77.76:8000/transcribe', {
+                    method: 'POST',
+                    body: form,
+                });
+                const text = await r.text();
+                const ts2 = new Date().toISOString();
+                hardcodedStatusEl.textContent =
+                    `[${ts}] POST http://195.133.77.76:8000/transcribe\n\n` +
+                    `Status: ${r.status}\n` +
+                    `Response:\n${text.slice(0, 2000)}\n\n` +
+                    `[${ts2}] готово`;
+            } catch (e) {
+                const ts2 = new Date().toISOString();
+                hardcodedStatusEl.textContent =
+                    `[${ts}] POST http://195.133.77.76:8000/transcribe\n\n` +
+                    `❌ FETCH ERROR: ${e.message}\n\n` +
+                    `[${ts2}] ошибка`;
+            }
+        });
+    }
+    // Конец E289
 
     // Update Whisper model status indicator (every 5s)
     const whisperStatusEl = content.querySelector('#whisper-model-status');
@@ -285,7 +432,12 @@ async function renderTranscriptionTab(content) {
     const updateWhisperStatus = async () => {
         if (!whisperStatusText) return;
         try {
-            const selectedModel = content.querySelector('#setting-whisper-model')?.value || 'unknown';
+            const selectedModel = content.querySelector('#setting-whisper-model')?.value || 'base';
+            // E246: если пустое/невалидное — fallback на 'base' (НЕ 'unknown')
+            if (!selectedModel || selectedModel === 'unknown' || selectedModel === 'null') {
+                console.warn('[whisper-status] empty model name, skipping');
+                return;
+            }
             const status = await api.getWhisperModelStatus(selectedModel);
             if (status.downloaded) {
                 whisperStatusText.innerHTML = `<span style="color: #16a34a;"><i class="fa-solid fa-check-circle"></i> ${selectedModel} скачана</span>`;
@@ -589,7 +741,12 @@ async function renderBotTab(content) {
                 </label>
             </div>
 
-            <button class="btn btn-primary" id="btn-save-bot">Сохранить</button>
+            <!-- E218: добавлена кнопка test-conn + контейнер для результатов -->
+            <div class="settings-actions-row" style="margin-top: 16px;">
+                <button class="btn btn-primary" id="btn-save-bot">Сохранить</button>
+                <button class="btn" id="btn-test-bot-conn">Проверить подключение</button>
+            </div>
+            <div id="bot-test-results"></div>
         </div>
     `;
 
@@ -600,10 +757,10 @@ async function renderBotTab(content) {
             telegram_allowed_users: content.querySelector('#setting-bot-users').value.trim(),
             notifications_enabled: content.querySelector('#setting-notifications').checked,
         });
-
-    // Bot test connection (US-067)
-    content.querySelector('#btn-test-bot-conn')?.addEventListener('click', () => runBotTestConnection(content));
     });
+
+    // E218: вынесено из лямбды btn-save-bot
+    content.querySelector('#btn-test-bot-conn')?.addEventListener('click', () => runBotTestConnection(content));
 }
 
 async function runBotTestConnection(content) {
@@ -762,9 +919,12 @@ async function renderDataTab(content) {
             const result = await api.clearAllData();
             const total = Object.values(result.deleted_counts).reduce((a, b) => a + b, 0);
             toast.success(`Удалено записей: ${total}, файлов: ${result.files_deleted}`);
-            // Clear local IndexedDB
-            if (window.storage) {
+            // E219: динамический импорт — storage не был импортирован в модуле
+            try {
+                const { storage } = await import('../storage/indexeddb.js');
                 await storage.reset();
+            } catch (e) {
+                console.warn('Failed to reset IndexedDB:', e);
             }
             // Reload page
             setTimeout(() => {

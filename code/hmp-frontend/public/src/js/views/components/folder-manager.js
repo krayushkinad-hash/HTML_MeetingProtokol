@@ -9,6 +9,10 @@
  * - Переименовывать папки
  * - Удалять папки
  */
+// E222: api и toast не были импортированы — FolderManager падал при load().
+import { api } from '../../api/client.js';
+import { toast } from '../../utils/toast.js';
+
 export class FolderManager {
     constructor(rootEl, onChange) {
         this.rootEl = rootEl;

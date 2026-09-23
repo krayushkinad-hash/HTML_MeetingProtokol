@@ -13,10 +13,15 @@ CLIENT_FILE = Path(__file__).parent.parent / "src" / "js" / "api" / "client.js"
 
 
 def check_syntax():
-    result = subprocess.run(
-        ["node", "--check", str(CLIENT_FILE)],
-        capture_output=True, text=True,
-    )
+    """E226: явно сообщаем если node не установлен."""
+    try:
+        result = subprocess.run(
+            ["node", "--check", str(CLIENT_FILE)],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        print("⚠ node not found — установите Node.js для проверки синтаксиса")
+        return None  # E226: None = skip (не критично)
     if result.returncode != 0:
         print("X Syntax error:")
         print(result.stderr)

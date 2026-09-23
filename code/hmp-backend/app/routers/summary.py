@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field  # E225: добавлен Field для E219
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,8 +43,9 @@ class SummaryResponse(BaseModel):
     provider: str
     model: str | None
     tokens_used: int | None
-    generated_at: datetime
-    regenerated: int
+    duration_ms: int | None = None  # E205: добавлено для совместимости с SummarizeResponse
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))  # E219: добавлено
+    regenerated: int = 0  # E205: добавлено (default 0 для новых саммари)
 
 
 # ============================================================================

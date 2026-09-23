@@ -15,13 +15,13 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, File, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging_config import get_logger
-from app.db.models import AudioFile, Protocol
+from app.db.models import AudioFile, Protocol, TranscriptionTask  # E207: TranscriptionTask добавлен в imports
 from app.db.session import get_db, AsyncSessionLocal
 from app.schemas import TranscriptionRequest, TranscriptionStatus
 from app.services.transcription import transcription_service
@@ -152,15 +152,8 @@ async def run_transcription(
         import hashlib
 
         # E150: вычисляем hash аудиофайла для resume-validation
+        # (audio_file_path_str будет определена ниже — используем ленивое вычисление)
         audio_hash = None
-        try:
-            audio_path_for_hash = Path(audio_file_path_str)
-            if audio_path_for_hash.exists():
-                audio_hash = hashlib.sha256(
-                    audio_path_for_hash.read_bytes()
-                ).hexdigest()[:32]
-        except Exception as hash_err:
-            logger.warning("audio_hash_failed", error=str(hash_err))
 
         db_task = _TTModel(
             id=task_id,
@@ -169,7 +162,7 @@ async def run_transcription(
             progress=0.0,
             current_chunk=0,
             started_at=_dt.now(),
-            audio_hash=audio_hash,  # E150
+            audio_hash=audio_hash,  # E150 — будет обновлено ниже
         )
         db.add(db_task)
         await db.commit()
@@ -209,6 +202,9 @@ async def run_transcription(
         logger.warning("transcription_task_persist_failed", error=str(e))
         await db.rollback()
 
+    # E187: используем settings.whisper_compute_type как default.
+    # Пользователь может переопределить через request, но default всегда из настроек.
+    actual_compute_type = body.compute_type or settings.whisper_compute_type
     logger.info(
         "transcribe_queued",
         task_id=str(task_id),
@@ -216,12 +212,39 @@ async def run_transcription(
         model=body.model,
         language=body.language,
         beam_size=body.beam_size,
-        compute_type=body.compute_type,
+        compute_type=actual_compute_type,
     )
 
     # --- Schedule background work ---------------------------------------
     audio_file_path_str = audio_file.file_path
     audio_path = Path(audio_file_path_str)
+
+    # E150: вычисляем hash аудиофайла (теперь когда audio_file_path_str доступен)
+    audio_hash = None
+    try:
+        audio_path_for_hash = Path(audio_file_path_str)
+        if audio_path_for_hash.exists():
+            audio_hash = hashlib.sha256(
+                audio_path_for_hash.read_bytes()
+            ).hexdigest()[:32]
+    except Exception as hash_err:
+        logger.warning("audio_hash_failed", error=str(hash_err))
+
+    # E150: обновляем hash в только что созданном db_task
+    try:
+        from app.db.models import TranscriptionTask as _TTModel2
+        from sqlalchemy import update as _upd
+        async with AsyncSessionLocal() as hdb:
+            await hdb.execute(
+                _upd(_TTModel2)
+                .where(_TTModel2.id == task_id)
+                .values(audio_hash=audio_hash)
+            )
+            await hdb.commit()
+            # E183: добавляем логирование успешного обновления hash
+            logger.info("audio_hash_updated", task_id=str(task_id), audio_hash=audio_hash)
+    except Exception as e:
+        logger.warning("audio_hash_update_failed", error=str(e))
 
     async def _runner() -> None:
         try:
@@ -230,6 +253,8 @@ async def run_transcription(
                 audio_path=audio_path,
                 task_id=task_id,
                 duration_sec=audio_file.duration_sec,
+                # E243: используем модель из запроса, fallback — settings.whisper_model
+                target_model_override=body.model or settings.whisper_model,
             )
             # P0-fix: transcribe() может вернуть status="failed" без raise.
             # Раньше _runner всегда писал "completed" — теряли провалы.
@@ -319,15 +344,34 @@ async def run_transcription(
     response_model=TranscriptionStatus,
     summary="Get transcription status",
 )
-async def get_transcription_status(task_id: uuid.UUID) -> TranscriptionStatus:
-    """Get current transcription status by task_id."""
+async def get_transcription_status(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TranscriptionStatus:
+    """Get current transcription status by task_id.
+
+    E182: для завершённых задач get_status() возвращает None — тогда идём в БД.
+    """
     status_obj = transcription_service.get_status(task_id)
-    if status_obj is None:
+    if status_obj is not None:
+        return status_obj
+
+    # E182: fallback в БД для завершённых задач
+    from app.db.models import TranscriptionTask as _TT
+    task = await db.get(_TT, task_id)
+    if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Задача {task_id} не найдена",
         )
-    return status_obj
+    return TranscriptionStatus(
+        task_id=task.id,
+        protocol_id=task.protocol_id,
+        status=task.status or "completed",  # type: ignore[arg-type]
+        progress_percent=int(task.progress or 0),
+        message=task.current_step,
+        error_message=task.error_message,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -490,6 +534,7 @@ async def resume_transcription_endpoint(
                 duration_sec=audio_file.duration_sec,
                 already_done_segments=already_done,
                 resume_from_sec=task.last_processed_sec or 0.0,
+                target_model_override=body.model or settings.whisper_model,
             )
             await update_task_status_in_db(
                 tid_uuid, "completed", progress=100.0,
@@ -979,22 +1024,44 @@ async def upgrade_weak_segments_endpoint(
     # Запускаем большую модель — она будет работать по всему аудио,
     # но мы сохраним только результаты для "слабых" сегментов
     # (Whisper не умеет resume с произвольной секунды — см. E152)
-    try:
-        from app.services.transcription import transcription_service
+    # E220: выносим blocking call в фоновую задачу.
+    # Иначе HTTP-запрос будет висеть минуты → таймаут браузера.
+    import asyncio as _asyncio
+    task_id = uuid.uuid4()
 
-        # Запускаем как обычную транскрибацию но пишем ТОЛЬКО обновления
-        # Для упрощения — пересчитываем всю дорожку и сравниваем по start_sec
-        result = await transcription_service.transcribe(
-            protocol_id=pid,
-            audio_path=audio_path,
-            task_id=uuid.uuid4(),  # НЕ реальная задача — только для логов
-            duration_sec=audio_file.duration_sec,
-            target_model_override=target_model,  # E162: используем large
-            only_update_weak=True,               # E162: обновляем только слабые
-        )
-    except Exception as exc:
-        logger.exception("upgrade_weak_segments_failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)[:300])
+    async def _upgrade_runner():
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.services.transcription import transcription_service
+
+            async with AsyncSessionLocal() as runner_db:
+                await transcription_service.transcribe(
+                    protocol_id=pid,
+                    audio_path=audio_path,
+                    task_id=task_id,
+                    duration_sec=audio_file.duration_sec,
+                    target_model_override=target_model,
+                    only_update_weak=True,
+                )
+            logger.info(
+                "upgrade_weak_segments_completed",
+                protocol_id=protocol_id,
+                target_model=target_model,
+            )
+        except Exception as exc:
+            logger.exception("upgrade_runner_failed", error=str(exc))
+
+    bg = _asyncio.create_task(_upgrade_runner())
+    from app.services.active_tasks import register_active_task
+    register_active_task(str(task_id), bg)
+
+    return {
+        "protocol_id": protocol_id,
+        "target_model": target_model,
+        "task_id": str(task_id),
+        "weak_segments_found": len(weak_segments),
+        "message": f"Upgrade queued: {len(weak_segments)} сегментов будут обработаны моделью {target_model}",
+    }
 
     # Подсчитать сколько сегментов реально улучшились
     upgraded_count = 0
@@ -1012,3 +1079,266 @@ async def upgrade_weak_segments_endpoint(
     }
 
 # E124: _DummyStatus class удалён — transcribe() создаёт правильный TranscriptionStatus
+
+# E264: proxy endpoint — транскрибирует через remote server (обход Mixed Content)
+from fastapi import Form as _Form
+from typing import Optional as _Optional
+import urllib.parse as _urlparse
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+import json as _json
+from starlette.concurrency import run_in_threadpool as _run_in_threadpool
+from decimal import Decimal as _Decimal
+
+
+def _make_multipart_body(file_bytes: bytes, file_name: str, extra_fields: dict) -> tuple[bytes, str]:
+    """Собирает multipart/form-data body."""
+    import uuid as _uuid
+    boundary = "----HMPBoundary" + _uuid.uuid4().hex
+    CRLF = "\r\n"
+    body_parts = []
+    for key, value in extra_fields.items():
+        body_parts.append("--" + boundary + CRLF)
+        body_parts.append('Content-Disposition: form-data; name="' + key + '"' + CRLF + CRLF)
+        body_parts.append(str(value) + CRLF)
+    body_parts.append("--" + boundary + CRLF)
+    body_parts.append('Content-Disposition: form-data; name="file"; filename="' + file_name + '"' + CRLF)
+    body_parts.append("Content-Type: audio/mpeg" + CRLF + CRLF)
+    body_parts.append(file_bytes.decode("latin-1"))
+    body_parts.append(CRLF + "--" + boundary + "--" + CRLF)
+    body = "".join(body_parts).encode("latin-1")
+    return body, boundary
+
+
+def _do_multipart_request(url: str, body: bytes, boundary: str, timeout_sec: float = 3600.0) -> tuple[bytes, int]:
+    """Sync HTTP POST с multipart body. Возвращает (data, status).
+
+    E280: Если первый запрос даёт 404 и URL не имеет path — пробуем добавить /transcribe
+    """
+    # Если URL заканчивается на / — отбросить слеш
+    base_url = url.rstrip("/")
+
+    urls_to_try = [url]
+    # E280: если URL — просто http://host:port без path, добавить /transcribe
+    parsed = _urlparse.urlparse(url)
+    if parsed.path in ("", "/"):
+        urls_to_try.append(base_url + "/transcribe")
+
+    for try_url in urls_to_try:
+        req = _urlreq.Request(
+            try_url, data=body, method="POST",
+            headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+        )
+        try:
+            with _urlreq.urlopen(req, timeout=timeout_sec) as resp:
+                return resp.read(), resp.status
+        except _urlerr.HTTPError as e:
+            if e.code == 404 and len(urls_to_try) > 1:
+                # попробуем следующий вариант
+                continue
+            return e.read(), e.code
+    return b"", 404
+
+
+@router.post("/remote")
+async def transcribe_via_remote(
+    protocol_id: str = _Form(...),  # принимаем строкой, валидируем uuid вручную
+    target_url: str = _Form(...),
+    target_path: str = _Form("/transcribe"),
+    model: str = _Form("base"),
+    language: _Optional[str] = _Form(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """E264: транскрибирует через remote Whisper-сервер.
+
+    Workflow:
+    1. Найти AudioFile в БД
+    2. Прочитать аудио с диска
+    3. POST multipart на {target_url}{target_path}
+    4. Сохранить segments в БД
+    5. Вернуть статистику
+    """
+    # E271: валидируем UUID вручную (Pydantic Form не парсит UUID строку автоматически)
+    try:
+        protocol_uuid = uuid.UUID(str(protocol_id))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid protocol_id format, expected UUID")
+
+    # E279: AudioFile не имеет protocol_id напрямую — идём через Protocol
+    proto_row = await db.execute(select(Protocol).where(Protocol.id == protocol_uuid))
+    protocol = proto_row.scalar_one_or_none()
+    if not protocol:
+        raise HTTPException(404, "Protocol not found: " + str(protocol_id))
+    if not protocol.audio_file_id:
+        raise HTTPException(400, "Protocol has no audio file attached")
+
+    af_row = await db.execute(select(AudioFile).where(AudioFile.id == protocol.audio_file_id))
+    audio = af_row.scalar_one_or_none()
+    if not audio:
+        raise HTTPException(404, "AudioFile not found")
+
+    logger.info("transcribe_via_remote_called", protocol_id=protocol_id, target_url=target_url)
+
+    file_path = Path(audio.file_path)
+    if not file_path.exists():
+        raise HTTPException(404, "Audio file missing on disk: " + str(file_path))
+
+    audio_bytes = file_path.read_bytes()
+    audio_ext = file_path.suffix.lstrip(".") or "m4a"
+
+    try:
+        body, boundary = _make_multipart_body(
+            audio_bytes, "audio." + audio_ext,
+            {"model": model, "language": language or "ru", "beam_size": "1"},
+        )
+
+        # E282: собираем URL правильно с защитой от мусорного target_path
+        # 1. base_url — без trailing slash
+        base_url = target_url.rstrip("/")
+        # 2. target_path валидируем — если содержит /api/v1/hmp, это неверный путь
+        raw_path = (target_path or "").strip()
+        if raw_path and ("/api/v1/hmp" in raw_path or "/api/" in raw_path):
+            logger.warning("transcribe_via_remote_bad_path", path=raw_path, hint="ignoring")
+            raw_path = ""
+        # 3. Если path пустой или мусорный — используем /transcribe
+        if not raw_path or raw_path == "/":
+            effective_path = "/transcribe"
+        elif not raw_path.startswith("/"):
+            effective_path = "/" + raw_path
+        else:
+            effective_path = raw_path
+        final_url = base_url + effective_path
+        logger.info("transcribe_via_remote_posting", url=final_url, file_size=len(audio_bytes))
+
+        data, status = await _run_in_threadpool(
+            _do_multipart_request,
+            final_url, body, boundary, 3600.0,
+        )
+        if status >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail="Remote " + str(status) + ": " + data[:200].decode("utf-8", errors="replace"),
+            )
+        result = _json.loads(data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, "Failed to reach remote: " + str(e))
+
+    segments = result.get("segments", [])
+    for seg in segments:
+        text_seg = seg.get("text", "").strip()
+        if not text_seg:
+            continue
+        db.add(Utterance(
+            protocol_id=protocol_uuid,  # E272: используем распарсенный uuid, а не строку
+            start_sec=_Decimal(str(round(seg.get("start", 0), 3))),
+            end_sec=_Decimal(str(round(seg.get("end", 0), 3))),
+            text=text_seg,
+        ))
+
+    proto = await db.get(Protocol, protocol_uuid)  # E272: uuid объект
+    if proto:
+        proto.status = "ready"
+    await db.commit()
+
+    return {
+        "task_id": str(protocol_id),
+        "segments_created": len(segments),
+        "text": result.get("text", ""),
+        "language": result.get("language"),
+    }
+
+
+# E284: тестовый endpoint для кнопки ТЕСТ — принимает файл напрямую (без protocol_id)
+# и шлёт на remote Whisper, возвращает ответ
+@router.post("/remote/test-upload")
+async def remote_test_upload(
+    file: UploadFile = File(...),
+    target_url: str = _Form("http://195.133.77.76:8000"),
+    target_path: str = _Form("/transcribe"),
+    model: str = _Form("base"),
+    language: str = _Form("ru"),
+):
+    """E284: тестовая отправка файла на remote Whisper.
+
+    Workflow:
+    1. Получить файл через multipart upload
+    2. Сохранить во временный файл (чтобы bytes-like объект превратить в файл)
+    3. POST multipart на {target_url}{target_path}
+    4. Вернуть результат
+    """
+    import tempfile as _tempfile
+    import shutil as _shutil
+    import os as _os
+    
+
+    # Сохраняем во временный файл
+    suffix = _os.path.splitext(file.filename or "audio")[1] or ".mp3"
+    tmp_fd, tmp_path = _tempfile.mkstemp(suffix=suffix)
+    try:
+        with _os.fdopen(tmp_fd, "wb") as tmp:
+            _shutil.copyfileobj(file.file, tmp)
+
+        # Читаем в байты
+        with open(tmp_path, "rb") as f:
+            audio_bytes = f.read()
+        audio_size = len(audio_bytes)
+
+        # Собираем multipart body
+        body, boundary = _make_multipart_body(
+            audio_bytes, file.filename or ("audio" + suffix),
+            {"model": model, "language": language, "beam_size": "1"},
+        )
+
+        # Строим URL (E282 логика)
+        base_url = target_url.rstrip("/")
+        effective_path = (target_path or "").strip()
+        if effective_path and ("/api/v1/hmp" in effective_path or "/api/" in effective_path):
+            effective_path = ""
+        if not effective_path or effective_path == "/":
+            effective_path = "/transcribe"
+        elif not effective_path.startswith("/"):
+            effective_path = "/" + effective_path
+        final_url = base_url + effective_path
+
+        logger.info("remote_test_upload_posting",
+                    url=final_url, file_size=audio_size, model=model, language=language)
+
+        # Отправляем на remote через threadpool
+        data, status = await _run_in_threadpool(
+            _do_multipart_request, final_url, body, boundary, 3600.0,
+        )
+
+        if status >= 400:
+            return {
+                "status": status,
+                "remote_url": final_url,
+                "file_size_bytes": audio_size,
+                "filename": file.filename,
+                "model": model,
+                "language": language,
+                "remote_response": data[:2000].decode("utf-8", errors="replace"),
+                "error": f"Remote returned {status}",
+            }
+
+        result = _json.loads(data)
+        return {
+            "status": "ok",
+            "remote_url": final_url,
+            "file_size_bytes": audio_size,
+            "filename": file.filename,
+            "model": model,
+            "language": language,
+            "remote_text_preview": result.get("text", "")[:500],
+            "segments_count": len(result.get("segments", [])),
+            "remote_language": result.get("language"),
+            "remote_duration_sec": result.get("duration_sec"),
+            "first_segment": result.get("segments", [{}])[0] if result.get("segments") else None,
+        }
+    finally:
+        # Удаляем временный файл
+        try:
+            _os.unlink(tmp_path)
+        except Exception:
+            pass

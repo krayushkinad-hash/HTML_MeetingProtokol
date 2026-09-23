@@ -191,23 +191,34 @@ function connectWebSocket(url) {
     }
 
     function handleWSMessage(msg) {
-        logToWS(`[${msg.event}] ${JSON.stringify(msg.data).slice(0, 100)}`);
+        // E221: backend шлёт {type: "...", ...}, а не {event: "..."}.
+        // Раньше switch по msg.event всегда падал в default с undefined.
+        const eventType = msg.type || msg.event;
+        const eventData = msg.data || msg;
 
-        switch (msg.event) {
+        logToWS(`[${eventType}] ${JSON.stringify(eventData).slice(0, 100)}`);
+
+        switch (eventType) {
             case 'utterance':
-                addUtterance(msg.data);
+                addUtterance(eventData);
                 break;
             case 'screenshot':
-                addScreenshot(msg.data);
+                addScreenshot(eventData);
                 break;
             case 'speaker_change':
-                toast.info(`Новый оратор: ${msg.data.new_speaker_label}`);
+                toast.info(`Новый оратор: ${eventData.new_speaker_label}`);
                 break;
             case 'heartbeat':
                 // No-op, just keep-alive
                 break;
+            case 'ack':
+                // Server echo — ignore
+                break;
+            case 'error':
+                console.warn('Server error:', eventData);
+                break;
             default:
-                console.warn('Unknown event:', msg.event);
+                console.warn('Unknown event type:', eventType, msg);
         }
     }
 }

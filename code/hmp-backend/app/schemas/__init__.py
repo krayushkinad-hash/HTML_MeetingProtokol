@@ -1,5 +1,8 @@
-import uuid
-"""Pydantic schemas for API request/response (NFR §4.4)."""
+"""Pydantic schemas for API request/response (NFR §4.4).
+
+E197: docstring первым, импорты ниже.
+"""
+import uuid  # используется в FolderCreate/Update/MoveProtocolRequest
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
@@ -28,13 +31,6 @@ class PaginationParams(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
     sort: str | None = None
 
-
-class PaginatedResponse(BaseModel):
-    """Standard paginated response."""
-    total: int
-    page: int
-    limit: int
-    items: list
 
 
 # ============================================================================
@@ -97,6 +93,8 @@ class ProtocolResponse(BaseModel):
     language: str = "ru"  # E148
     translation_language: str | None = None  # E149
     audio_file: AudioFileResponse | None
+    # E197: добавлено folder_id — фронт использует protocol.folder_id
+    folder_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -138,14 +136,19 @@ class UtteranceResponse(BaseModel):
 
 
 class UtteranceUpdateText(BaseModel):
-    """US-048: Edit utterance text."""
-    text: str = Field(..., min_length=1, max_length=2000)
+    """US-048: Edit utterance text. E197: max_length 10000 для длинных реплик."""
+    text: str = Field(..., min_length=1, max_length=10000)
     version_snapshot: bool = True
 
 
 class UtteranceUpdateSpeaker(BaseModel):
     """Reassign speaker."""
     speaker_id: UUID
+
+
+class UtteranceUpdateImportant(BaseModel):
+    """E172: Toggle 'important' flag (закладка 'Важное')."""
+    important: bool
 
 
 # ============================================================================
@@ -189,26 +192,39 @@ class SpeakerMergeRequest(BaseModel):
 # ============================================================================
 
 class TranscriptionRequest(BaseModel):
-    """POST /transcribe/run."""
+    """POST /transcribe/run.
+
+    E184: модель по умолчанию берётся из settings.whisper_model (НЕ large-v3).
+    Пользователь явно выбирает модель в Settings → Whisper Models → Active.
+    Если frontend передаёт model=None, используется settings.whisper_model.
+    """
     protocol_id: UUID
-    model: Literal["tiny", "base", "small", "medium", "large-v3"] = "large-v3"
+    model: Literal["tiny", "base", "small", "medium", "large-v3"] | None = None
     language: str = "ru"
     prompt: str | None = None
     beam_size: int = Field(default=1, ge=1, le=5)
-    compute_type: Literal["float16", "int8", "float32"] = "float16"
+    # E197: None = использовать settings.whisper_compute_type
+    compute_type: Literal["float16", "int8", "float32"] | None = None
     initial_prompt: str | None = None
 
 
 class TranscriptionStatus(BaseModel):
+    """E197: добавлено поле message + расширен Literal."""
     task_id: UUID
     protocol_id: UUID
-    status: Literal["queued", "processing", "paused", "completed", "failed", "cancelled"]
+    # E197: расширил — добавлены running/starting для синхронизации с dataclass
+    status: Literal[
+        "queued", "processing", "running", "starting",
+        "paused", "completed", "failed", "cancelled",
+    ]
     progress_percent: int = Field(ge=0, le=100)
     current_chunk: int | None = None
     total_chunks: int | None = None
     peak_rss_mb: float | None = None
     estimated_completion: datetime | None = None
     error_message: str | None = None
+    # E197: message для heartbeat (status.message = "Обработка аудио... 96с")
+    message: str | None = None
     wer_quality: float | None = None
 
 
@@ -321,7 +337,8 @@ class ExportRequest(BaseModel):
 class ExportStatus(BaseModel):
     task_id: UUID
     protocol_id: UUID
-    status: Literal["queued", "processing", "completed", "failed"]
+    # E214: расширен Literal для будущей поддержки running/cancelled
+    status: Literal["queued", "processing", "running", "completed", "failed", "cancelled"]
     progress_percent: int = Field(ge=0, le=100)
     estimated_completion: datetime | None
     output_path: str | None

@@ -11,6 +11,7 @@ template-driven implementation when ready.
 """
 from __future__ import annotations
 
+import asyncio  # E204: для asyncio.to_thread
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,8 +149,9 @@ async def _run_export_task(
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Generate DOCX (blocking — fine in BackgroundTasks)
-            _build_docx(protocol, utterances, output_path)
+            # E204: генерация DOCX в отдельном потоке чтобы не блокировать event loop
+            # Без этого — event loop зависает на секунды/минуты для больших файлов
+            await asyncio.to_thread(_build_docx, protocol, utterances, output_path)
 
             # Update task as completed
             size_bytes = output_path.stat().st_size if output_path.exists() else None
@@ -392,12 +394,16 @@ async def archive_protocol(protocol_id: uuid.UUID, db: AsyncSession = Depends(ge
         "archive_id": str(archive_id),
         "path": str(archive_path),
         "size_kb": len(buf.getvalue()) // 1024,
-        "download_url": f"/api/v1/hmp/export/download/{archive_id}",
+        # E203: переименовано download → download-archive чтобы не конфликтовать
+        # с /export/download/{task_id} (DOCX)
+        "download_url": f"/api/v1/hmp/export/download-archive/{archive_id}",
     }
 
 
 @router.get(
-    "/export/download/{archive_id}",
+    # E203: переименовано из /export/download/{archive_id} чтобы не конфликтовать
+    # с /export/download/{task_id} (DOCX)
+    "/export/download-archive/{archive_id}",
     response_class=FileResponse,
     summary="Download archived ZIP",
 )

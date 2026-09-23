@@ -14,6 +14,7 @@ from app.schemas import (
     UtteranceResponse,
     UtteranceUpdateSpeaker,
     UtteranceUpdateText,
+    UtteranceUpdateImportant,
 )
 
 logger = get_logger(__name__)
@@ -391,6 +392,43 @@ async def restore_utterance_version(
         protocol_id=str(utterance.protocol_id),
         restored_from_version=version_number,
         correlation_id=correlation_id,
+    )
+
+    return _to_response(utterance)
+
+
+# ----------------------------------------------------------------------------
+# PATCH /utterances/{id}/important  (E172)
+# ----------------------------------------------------------------------------
+
+
+@router.patch(
+    "/utterances/{utterance_id}/important",
+    response_model=UtteranceResponse,
+    summary="Toggle 'important' bookmark (US-087)",
+)
+async def toggle_utterance_important(
+    utterance_id: uuid.UUID,
+    body: UtteranceUpdateImportant,
+    db: AsyncSession = Depends(get_db),
+) -> UtteranceResponse:
+    """E172: пометить/снять закладку 'Важное'.
+
+    Меняет поле Utterance.important на значение body.important.
+    Возвращает обновлённое состояние.
+    """
+    utterance = await _load_utterance(db, utterance_id)
+
+    utterance.important = body.important
+    utterance.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    utterance = await _load_utterance(db, utterance.id)
+
+    logger.info(
+        "utterance_important_toggled",
+        utterance_id=str(utterance.id),
+        protocol_id=str(utterance.protocol_id),
+        important=utterance.important,
     )
 
     return _to_response(utterance)

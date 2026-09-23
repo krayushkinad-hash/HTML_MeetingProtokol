@@ -33,6 +33,14 @@ export class Modal extends HTMLElement {
         this.attachEvents();
     }
 
+    // E224: снимаем обработчик с document при удалении из DOM (утечка памяти).
+    disconnectedCallback() {
+        if (this._keydownHandler) {
+            document.removeEventListener('keydown', this._keydownHandler);
+            this._keydownHandler = null;
+        }
+    }
+
     open(title = '') {
         if (title) this.title = title;
         this.setAttribute('open', '');
@@ -144,7 +152,8 @@ export class Modal extends HTMLElement {
         if (backdrop) {
             backdrop.addEventListener('click', () => this.close());
         }
-        document.addEventListener('keydown', (e) => {
+        // E224: сохраняем handler в this._keydownHandler для disconnectedCallback
+        this._keydownHandler = (e) => {
             if (!this.isOpen) return;
             if (e.key === 'Escape') {
                 e.preventDefault();
@@ -166,7 +175,8 @@ export class Modal extends HTMLElement {
                     first.focus();
                 }
             }
-        });
+        };
+        document.addEventListener('keydown', this._keydownHandler);
     }
 
     updateTitle() {

@@ -34,9 +34,10 @@ def check_file(file_path):
     text = file_path.read_text(encoding="utf-8")
     lines = text.split("\n")
 
-    in_template = False
-    in_block_comment = False
-    in_string = None  # None, '"', "'", '`'
+    # E225: убраны мёртвые переменные in_template, in_block_comment, in_string.
+    # MAX_LINE_LENGTH проверяется на ВСЕХ строках, что иногда даёт false-positive
+    # для длинных HTML в template literals. Принимаем как компромисс —
+    # такие строки лучше рефакторить в любом случае.
 
     prev_blank_count = 0
 

@@ -469,3 +469,46 @@ End-to-end сценарий (для часовой записи):
 | E151 | Audio hash validation |
 | E152 | Известное ограничение (Whisper не умеет resume) |
 | E153 | DELETE в router для повторной транскрибации |
+
+## US-087 — Закладки "Важное"
+
+### Frontend
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `<button btn-mark-important>` ☆ | protocol.js | Кнопка закладки |
+| `<button btn-important-marked>` ⭐ | protocol.js | Активная закладка |
+| `wireImportantButtons()` | protocol.js | Обработчик (E171: guard по data-wired) |
+| `.utterance-item.is-important` | protocol.css | Желтая рамка |
+
+### Backend
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `PATCH /utterances/{id}/important` | routers/utterances.py | E172: toggle endpoint |
+| `UtteranceUpdateImportant` | schemas/__init__.py | Body схема |
+| `UtteranceResponse.important` | schemas/__init__.py | Поле в response |
+
+### US-087 ↔ E-коды
+| E-код | Описание |
+|---|---|
+| E171 | Ремонт пометки решений (использование guard `data-wired`) |
+| E172 | Закладки "Важное" (важная функциональность) |
+
+## E173 — Поддержка webm/opus/mka
+
+### Frontend
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `ALLOWED_EXTENSIONS` | views/upload.js | 16 форматов: mp3, wav, m4a, ogg, flac, opus, **webm**, aac, mka, mp4, mkv, webm, mov, avi, 3gp, ogv |
+
+### Backend
+| Компонент | Файл | Что делает |
+|---|---|---|
+| `mime_to_ext` | routers/protocols.py | audio/webm → webm, video/webm → webm |
+| `WhisperModel.transcribe()` | services/transcription.py | ffmpeg decode любого формата |
+| US-088 | Edit protocol attributes | PATCH /protocols/{id} | protocol.js (wireEditMetadata) |
+| US-089 | Remote Whisper server | PATCH /user-setting (whisper_remote_*) | settings.js (HTML+handlers) |
+| US-089 | — | user_setting model + migration E254 | models.py, scripts/migrations/2026_09_23_* |
+| US-089 | — | transcribeRemote() + saveRemoteResultToBackend() | protocol.js (XHR upload) |
+| US-089 | — | Whisper FastAPI server | /opt/whisper-server/app/main.py |
+| US-089 | — | CORS middleware | fastapi.middleware.cors |
+| US-089 | — | systemd + deploy | whisper-server.service, deploy-whisper-only.sh |

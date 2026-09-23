@@ -8,7 +8,13 @@
 import { api } from '../api/client.js';
 import { toast } from '../utils/toast.js';
 
-const ALLOWED_EXTENSIONS = ['mp3', 'wav', 'mp4', 'mkv', 'ogg', 'flac', 'm4a'];
+// E173: webm, opus, avi, mov, 3gp, mka — теперь поддерживаются
+const ALLOWED_EXTENSIONS = [
+    // Аудио
+    'mp3', 'wav', 'm4a', 'ogg', 'flac', 'opus', 'webm', 'aac', 'mka',
+    // Видео
+    'mp4', 'mkv', 'webm', 'mov', 'avi', '3gp', 'ogv',
+];
 const MAX_SIZE_MB = 10240; // 10 GB
 
 export function renderUploadView(rootEl) {

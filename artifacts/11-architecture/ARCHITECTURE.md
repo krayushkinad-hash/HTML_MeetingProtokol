@@ -1185,3 +1185,93 @@ open http://localhost:8000/static/
 | **Инфраструктура (systemd, rclone)** | ✅ | ⏳ При deployment |
 
 **Заключение:** архитектура полностью определена. Можно начинать `code-scaffold-generator` для генерации скелета backend.
+
+## Распределённая архитектура (US-089)
+
+### C4: Container diagram
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  USER (Browser)                                              │
+│  ┌──────────────────────────────────────────────────┐        │
+│  │  Frontend SPA (Vanilla JS)                       │        │
+│  │  http://127.0.0.1:5173                          │        │
+│  │  • UI + Drag&Drop upload                         │        │
+│  │  • IndexedDB offline cache                       │        │
+│  └────────────┬─────────────────────────────────────┘        │
+└───────────────┼──────────────────────────────────────────────┘
+                │ HTTP/JSON (CORS)
+                ▼
+┌───────────────────────────────────────────────────────────────┐
+│  LOCAL BACKEND (FastAPI)                                      │
+│  http://127.0.0.1:8000/api/v1/hmp/                          │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │ FastAPI app                                          │    │
+│  │  • PostgreSQL (utterances, decisions, protocols)    │    │
+│  │  • Local Whisper (если не remote)                   │    │
+│  │  • Polling progress                                 │    │
+│  │  • Recording `user_setting.whisper_remote_enabled`  │    │
+│  └──────────────────────────────────────────────────────┘    │
+└───────────────────────────────────────────────────────────────┘
+                │ HTTPS (optional, для prod)
+                ▼
+┌───────────────────────────────────────────────────────────────┐
+│  REMOTE WHISPER (опционально)                                 │
+│  http://195.133.77.76:8000 (или свой URL)                    │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │ FastAPI app (минимальный)                           │    │
+│  │  • /health endpoint                                 │    │
+│  │  • POST /transcribe (multipart)                     │    │
+│  │  • CORS middleware                                  │    │
+│  │  • faster-whisper (base/small/medium/large-v3)     │    │
+│  │  • systemd сервис                                   │    │
+│  └──────────────────────────────────────────────────────┘    │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Sequence: Remote transcription (US-089)
+
+```
+User         Frontend          Local Backend     Remote Whisper
+ │               │                    │                  │
+ │  click ✓      │                    │                  │
+ ├──────────────►│                    │                  │
+ │               │ read user_setting  │                  │
+ │               ├───────────────────►│                  │
+ │               │ enabled=true, url=...                 │
+ │               │◄───────────────────┤                  │
+ │               │                    │                  │
+ │               │ GET /media/...source.webm             │
+ │               ├───────────────────►│                  │
+ │               │◄──────────────────┤ audio bytes       │
+ │               │                    │                  │
+ │               │ FormData(file, model, lang)            │
+ │               ├───────────[XHR upload progress]────────►│
+ │               │                    │                  │ loads Whisper
+ │               │                    │                  │ transcribes
+ │               │◄──── JSON {text, segments[]} ───────────┤
+ │               │                    │                  │
+ │  progress bar │                    │                  │
+ │  updates      │                    │                  │
+ │               │                    │                  │
+ │  POST each segment to /api/v1/hmp/utterances             │
+ │               ├───────────────────►│                  │
+ │               │ reload transcript   │                  │
+ │               │ toast.success: N реплик               │
+ │               │                    │                  │
+ ◄───────────────┤                    │                  │
+```
+
+### Компоненты
+
+- **Local Backend** — управляет UI state, polling, persistence (БД)
+- **Remote Whisper** — pure compute, stateless (можно горизонтально масштабировать)
+- **Frontend** — switch между local/remote на основе user_setting
+
+### Trade-offs
+
+| Подход | Плюс | Минус |
+|---|---|---|
+| **Pure local** | Нет интернета | Медленно на CPU ноутбука |
+| **Pure remote** | Быстро, качественно | Зависит от сети, нужна VPS |
+| **Hybrid (E254)** | Гибкость, fallback | Немного сложнее UI |

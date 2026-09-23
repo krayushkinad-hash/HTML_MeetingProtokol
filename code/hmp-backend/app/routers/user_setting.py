@@ -1,29 +1,28 @@
-"""User settings (US-026, US-036, US-054..066, API §12)."""
-from datetime import datetime, timezone
 from typing import Literal
-
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from datetime import datetime, timezone
+from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.logging_config import get_logger
-from app.db.models import UserSetting
 from app.db.session import get_db
+from app.db.models import UserSetting
+from app.core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
 router = APIRouter()
 
-
-# ---------------------------------------------------------------------------
-# Schemas — расширенные (US-054..066)
-# ---------------------------------------------------------------------------
-
+# -----------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------}
 UserSettingProvider = Literal["local_ollama", "gigachat", "hermes"]
 UserSettingWhisper = Literal["tiny", "base", "small", "medium", "large-v3"]
 UserSettingTheme = Literal["light", "dark", "auto"]
 
 
+# -----------------------------------------------------------------------
+# Schemas
+# -----------------------------------------------------------------------}
 class UserSettingUpdate(BaseModel):
     """Partial update payload for PATCH /user-setting."""
     llm_provider: UserSettingProvider | None = None
@@ -45,6 +44,11 @@ class UserSettingUpdate(BaseModel):
     telegram_bot_token: str | None = None
     telegram_webhook_url: str | None = None
     telegram_allowed_users: str | None = None
+
+    # E257: remote Whisper settings (US-089)
+    whisper_remote_enabled: bool | None = None
+    whisper_remote_url: str | None = Field(None, max_length=255)
+    whisper_remote_path: str | None = Field(None, max_length=100)
 
 
 class UserSettingResponse(BaseModel):
@@ -72,26 +76,16 @@ class UserSettingResponse(BaseModel):
     telegram_webhook_url: str | None = None
     telegram_allowed_users: str | None = None
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-async def get_or_create_singleton_user_setting(db: AsyncSession) -> UserSetting:
-    """MVP single-user: the first user_setting row is the singleton."""
-    result = await db.execute(select(UserSetting).limit(1))
-    setting = result.scalar_one_or_none()
-    if setting is None:
-        setting = UserSetting()
-        db.add(setting)
-        await db.commit()
-        await db.refresh(setting)
-        logger.info("user_setting_created")
-    return setting
+    # E257: remote Whisper settings (US-089)
+    whisper_remote_enabled: bool = False
+    whisper_remote_url: str | None = None
+    whisper_remote_path: str | None = "/transcribe"
 
 
+# -----------------------------------------------------------------------
+# ORM → API conversion
+# -----------------------------------------------------------------------}
 def _to_response(setting: UserSetting) -> UserSettingResponse:
-    """Convert ORM → response."""
     return UserSettingResponse(
         id=str(setting.id),
         llm_provider=setting.llm_provider,
@@ -113,37 +107,72 @@ def _to_response(setting: UserSetting) -> UserSettingResponse:
         telegram_bot_token=setting.telegram_bot_token,
         telegram_webhook_url=setting.telegram_webhook_url,
         telegram_allowed_users=setting.telegram_allowed_users,
+        whisper_remote_enabled=bool(getattr(setting, "whisper_remote_enabled", False)),
+        whisper_remote_url=getattr(setting, "whisper_remote_url", None),
+        whisper_remote_path=getattr(setting, "whisper_remote_path", None) or "/transcribe",
     )
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# Singleton helpers
+# -----------------------------------------------------------------------}
+async def get_or_create_singleton_user_setting(db: AsyncSession) -> UserSetting:
+    from sqlalchemy import select
+    try:
+        result = await db.execute(select(UserSetting).limit(1))
+    except Exception as e:
+        # E257: если модель имеет поля которых нет в БД — fallback на текстовый запрос
+        logger.warning("user_setting_select_failed_try_text", error=str(e))
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        from sqlalchemy import text
+        result = await db.execute(text("SELECT id FROM user_setting LIMIT 1"))
+        row = result.fetchone()
+        if row:
+            # Получаем через get() — Pydantic ничего не валидирует здесь, но SQLAlchemy может
+            from uuid import UUID
+            try:
+                setting = await db.get(UserSetting, UUID(str(row[0])))
+                if setting:
+                    return setting
+            except Exception:
+                pass
+        # Создаём новый
+        setting = UserSetting()
+        db.add(setting)
+        await db.commit()
+        await db.refresh(setting)
+        return setting
 
-@router.get(
-    "/user-setting",
-    response_model=UserSettingResponse,
-    summary="Get current user settings (singleton)",
-)
-async def get_user_setting(
-    db: AsyncSession = Depends(get_db),
-) -> UserSettingResponse:
-    """Return the singleton user setting, creating it on first call (US-026)."""
+    setting = result.scalar_one_or_none()
+    if setting:
+        return setting
+
+    setting = UserSetting()
+    db.add(setting)
+    await db.commit()
+    await db.refresh(setting)
+    logger.info("initial_user_setting_created")
+    return setting
+
+
+# -----------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------}
+@router.get("/user-setting")
+async def get_user_setting(db: AsyncSession = Depends(get_db)) -> UserSettingResponse:
     setting = await get_or_create_singleton_user_setting(db)
     return _to_response(setting)
 
 
-@router.patch(
-    "/user-setting",
-    response_model=UserSettingResponse,
-    summary="Update user settings (partial)",
-)
+@router.patch("/user-setting")
 async def update_user_setting(
     body: UserSettingUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> UserSettingResponse:
-    """Partial update of all settings fields (US-054..066)."""
     setting = await get_or_create_singleton_user_setting(db)
     correlation_id = getattr(request.state, "correlation_id", None)
 
@@ -160,8 +189,13 @@ async def update_user_setting(
 
     setting.updated_at = datetime.now(timezone.utc)
 
-    await db.commit()
-    await db.refresh(setting)
+    try:
+        await db.commit()
+        await db.refresh(setting)
+    except Exception as e:
+        await db.rollback()
+        logger.error("user_setting_update_failed", error=str(e))
+        raise
 
     logger.info(
         "user_setting_updated",

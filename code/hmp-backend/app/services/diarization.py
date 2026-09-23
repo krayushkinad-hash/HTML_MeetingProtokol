@@ -58,6 +58,27 @@ class DiarizationService:
         if not utterances:
             raise ValueError(f"No utterances for protocol {protocol_id}")
 
+        # E198: очищаем старые спикеры, отвязываем utterance, удаляем старый результат.
+        # Это решает проблему с UniqueConstraint и dangling speakers.
+        from sqlalchemy import delete as _del
+        # Удаляем старый DiarizationResult (protocol_id unique)
+        await db.execute(
+            _del(DiarizationResult).where(
+                DiarizationResult.protocol_id == protocol_id
+            )
+        )
+        # Отвязываем utterance от старых спикеров
+        await db.execute(
+            sql_update(Utterance)
+            .where(Utterance.protocol_id == protocol_id)
+            .values(speaker_id=None)
+        )
+        # Удаляем старых спикеров (был UniqueConstraint на speaker_label)
+        await db.execute(
+            _del(Speaker).where(Speaker.protocol_id == protocol_id)
+        )
+        await db.flush()
+
         # 2. Group into turns
         turns = []  # [{start, end, texts: [...]}]
         current = None
@@ -140,33 +161,27 @@ class DiarizationService:
         protocol_id: uuid.UUID,
         turn_index: int,
     ) -> Speaker:
-        """Создать Speaker если такого ещё нет для protocol.
+        """Создать Speaker для turn.
+
+        E198: после очистки старых спикеров в diarize_protocol, всегда создаём
+        нового. Убрал SELECT-в-цикле (O(n²) → O(n)).
 
         Имя: Speaker 1, Speaker 2, ...
         Color: хэш turn_index → один из 6 цветов
         """
-        # Существующие ли?
-        existing = await db.execute(
-            select(Speaker).where(Speaker.protocol_id == protocol_id)
-        )
-        existing_speakers = existing.scalars().all()
-
-        if turn_index < len(existing_speakers):
-            return existing_speakers[turn_index]
-
-        # Создать нового
         COLORS = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899"]
         color = COLORS[turn_index % len(COLORS)]
         speaker_label = f"Speaker {turn_index + 1}"
+        # E189: voice_signature удалён — этого поля нет в модели Speaker
         speaker = Speaker(
             protocol_id=protocol_id,
             display_name=speaker_label,
             speaker_label=speaker_label,
             color=color,
-            voice_signature=None,  # E141: эвристика, нет эмбеддингов
         )
         db.add(speaker)
-        await db.flush()
+        await db.flush()  # нужен id для update Utterance.speaker_id
+        return speaker
         return speaker
 
 

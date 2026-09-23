@@ -90,3 +90,5 @@ Jinja2==3.1.4                                       # Templating (Starlette)  # 
 
 # FastAPI Extras
 python-multipart==0.0.18                            # Multipart form parsing
+# E163: PySocks — для huggingface_hub если SOCKS proxy в env
+PySocks>=1.7.1

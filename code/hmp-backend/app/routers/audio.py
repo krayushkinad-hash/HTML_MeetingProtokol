@@ -12,6 +12,7 @@ to a playable URL with optional seek offset.
 import mimetypes
 import re
 import uuid
+from datetime import datetime, timezone  # E206: для datetime.now(timezone.utc)
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -125,10 +126,12 @@ async def stream_source_by_protocol(
             detail=f"Файл не найден на диске: {file_path}",
         )
 
+    # E180-fix: НЕ передаём filename= — иначе Content-Disposition: attachment
+    # ломает стриминг в <video>/<audio>
     return FileResponse(
         path=str(file_path),
-        media_type=audio_file.mime_type or 'application/octet-stream',
-        filename=audio_file.filename,
+        media_type=audio_file.mime_type or _guess_mime(file_path),
+        headers={"Accept-Ranges": "bytes"},
     )
 
 
@@ -363,6 +366,95 @@ async def stream_audio_file(
     return FileResponse(
         path=str(file_path),
         media_type=mime,
-        filename=audio.filename,
         headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"},
     )
+
+
+
+# ----------------------------------------------------------------------------
+# E181: POST /audio-files/{id}/transcode — перекодировка webm для браузеров
+# ----------------------------------------------------------------------------
+
+
+@router.post(
+    "/audio-files/{audio_file_id}/transcode",
+    summary="Transcode webm file to fix browser playback (E181)",
+)
+async def transcode_audio_file(
+    audio_file_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Перекодирует .webm файл через ffmpeg для правильного воспроизведения.
+
+    Используется когда файл записан OBS/MediaRecorder без proper Cues
+    и Chrome не может делать seek (PIPELINE_ERROR_READ).
+
+    Использует -c:v copy -c:a copy (без перекодирования потоков),
+    только пересобирает контейнер с Cues в начале.
+    """
+    row = await db.execute(select(AudioFile).where(AudioFile.id == audio_file_id))
+    audio: AudioFile | None = row.scalar_one_or_none()
+    if not audio:
+        raise HTTPException(404, "Аудио файл не найден")
+
+    file_path = Path(audio.file_path)
+    if not file_path.exists():
+        raise HTTPException(404, "Файл не найден на диске")
+
+    # Используем shutil для поиска ffmpeg
+    import shutil
+    import subprocess
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        # Пробуем стандартные пути
+        for path in [
+            "C:/ffmpeg/bin/ffmpeg.exe",
+            "C:/Program Files/ffmpeg/bin/ffmpeg.exe",
+        ]:
+            if Path(path).exists():
+                ffmpeg_bin = path
+                break
+    if not ffmpeg_bin:
+        raise HTTPException(500, "ffmpeg не найден. Установите ffmpeg или добавьте в PATH")
+
+    # Output = temp файл
+    output_path = file_path.with_suffix(".transcoded.webm")
+
+    try:
+        # E181: -c copy = без перекодирования, только пересборка контейнера
+        result = subprocess.run(
+            [
+                ffmpeg_bin, "-y",
+                "-i", str(file_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ],
+            capture_output=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "transcode_failed",
+                file=str(file_path),
+                stderr=result.stderr.decode("utf-8", errors="ignore")[:500],
+            )
+            raise HTTPException(500, "ffmpeg не смог перекодировать файл")
+
+        # Заменяем оригинал
+        output_path.replace(file_path)
+        audio.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+        return {
+            "status": "ok",
+            "transcoded_file": str(file_path),
+            "note": "Контейнер пересобран с faststart. Потоки не перекодировались.",
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "ffmpeg timeout (>10 мин)")
+    except Exception as e:
+        # Cleanup temp
+        if output_path.exists():
+            output_path.unlink()
+        raise HTTPException(500, f"Ошибка транскодирования: {e}")

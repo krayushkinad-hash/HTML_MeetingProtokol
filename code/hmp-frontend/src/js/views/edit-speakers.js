@@ -107,7 +107,9 @@ export async function renderEditSpeakers(rootEl, protocolId) {
         card.querySelector('.delete-btn').addEventListener('click', async () => {
             if (!confirm('Удалить оратора? Будут удалены ТОЛЬКО ораторы без реплик.')) return;
             try {
-                await fetch(`http://127.0.0.1:8000/api/v1/hmp/speakers/${speakerId}`, { method: 'DELETE' });
+                // E217: используем api.deleteSpeaker — единая обработка ошибок,
+                // X-Correlation-Id, корректный статус при 409 (есть реплики)
+                await api.deleteSpeaker(speakerId);
                 toast.success('Оратор удалён');
                 renderEditSpeakers(rootEl, protocolId);
             } catch (err) {

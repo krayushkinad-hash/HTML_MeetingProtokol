@@ -31,7 +31,10 @@ function openDB() {
         const request = indexedDB.open(DB_NAME);
 
         request.onerror = () => {
-            // Only delete if DB version is corrupted (rare case)
+            // E215: сбросить dbPromise при ошибке.
+            // Иначе если openDB упало, при следующем вызове вернётся тот же
+            // rejected promise — приложение навсегда потеряет доступ к IDB.
+            dbPromise = null;
             console.warn('Database open failed, trying repair...');
             const deleteReq = indexedDB.deleteDatabase(DB_NAME);
             deleteReq.onsuccess = () => {
@@ -39,11 +42,17 @@ function openDB() {
                 const retry = indexedDB.open(DB_NAME, DB_VERSION);
                 retry.onupgradeneeded = (e) => createStores(e.target.result);
                 retry.onsuccess = () => resolve(retry.result);
-                retry.onerror = () => reject(retry.error);
+                retry.onerror = () => {
+                    dbPromise = null;  // E215: сброс после retry ошибки
+                    reject(retry.error);
+                };
             };
-            deleteReq.onerror = () => reject(request.error);
+            deleteReq.onerror = () => {
+                dbPromise = null;  // E215
+                reject(request.error);
+            };
             deleteReq.onblocked = () => {
-                console.error('Database delete blocked - close other tabs');
+                dbPromise = null;  // E215
                 reject(new Error('Database blocked by other tabs'));
             };
         };
@@ -255,10 +264,13 @@ async function resetDB() {
             console.log('Database deleted, will recreate on next access');
             resolve();
         };
-        deleteReq.onerror = () => reject(deleteReq.error);
+        deleteReq.onerror = () => {
+            dbPromise = null;  // E215
+            reject(request.error);
+        };
         deleteReq.onblocked = () => {
-            console.warn('Database deletion blocked. Close other tabs.');
-            resolve();
+            dbPromise = null;  // E215
+            reject(new Error('Database blocked by other tabs'));
         };
     });
 }

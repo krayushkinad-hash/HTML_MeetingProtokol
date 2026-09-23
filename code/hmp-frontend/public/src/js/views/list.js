@@ -8,7 +8,8 @@ import { storage, STORES } from '../storage/indexeddb.js';
 import { toast } from '../utils/toast.js';
 import { ICONS } from './components/icons.js';
 
-import { FolderManager, FOLDER_MANAGER_CSS } from './components/folder-manager.js';
+// E214: FolderManager не инстанцируется — убран из импорта
+import { FOLDER_MANAGER_CSS } from './components/folder-manager.js';
 
 
 let currentFolderFilter = null;  // null = all, folder.id = filter by folder
@@ -48,12 +49,19 @@ ${FOLDER_MANAGER_CSS}
 
     async function load(q = '') {
         try {
-            let protocols;
+            // E213: клиентский фильтр по протоколам.
+            // api.search() ищет по utterance, а не по протоколам —
+            // раньше при поиске показывались строки с undefined.
+            const response = await api.listProtocols({ limit: 200 });
+            let protocols = response.items || [];
+
             if (q) {
-                protocols = await api.search(q);
-            } else {
-                const response = await api.listProtocols({ limit: 200 });
-                protocols = response.items || [];
+                const qLower = q.toLowerCase();
+                protocols = protocols.filter(p =>
+                    (p.title || '').toLowerCase().includes(qLower) ||
+                    (p.location || '').toLowerCase().includes(qLower) ||
+                    (p.chair || '').toLowerCase().includes(qLower)
+                );
             }
 
             // Кэшируем в IndexedDB для офлайн

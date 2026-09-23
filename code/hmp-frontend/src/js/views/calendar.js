@@ -69,7 +69,11 @@ export async function renderCalendarView(rootEl) {
             if ((day + offset - 1) % 7 === 0 && day > 1) html += '</tr><tr>';
             const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
             const count = counts[dateStr] || 0;
-            const isToday = dateStr === new Date().toISOString().slice(0, 10);
+            // E223: используем локальную дату (не UTC), иначе после 21:00 MSK
+            // "сегодня" выделялось бы неправильно.
+            const _today = new Date();
+            const todayStr = `${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, '0')}-${String(_today.getDate()).padStart(2, '0')}`;
+            const isToday = dateStr === todayStr;
             const bg = count > 0 ? 'var(--accent)' : isToday ? 'var(--bg-tertiary)' : 'transparent';
             const color = count > 0 ? 'white' : 'inherit';
             html += `<td style="padding:8px; text-align:center; cursor:${count > 0 ? 'pointer' : 'default'}; background:${bg}; color:${color}; border-radius:6px;" data-date="${dateStr}">

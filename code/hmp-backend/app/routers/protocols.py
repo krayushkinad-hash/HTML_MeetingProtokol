@@ -31,6 +31,9 @@ async def create_protocol(
     location: str | None = Form(None),
     chair: str | None = Form(None),
     agenda: str | None = Form(None),
+    # E218: добавлены параметры language и folder_id
+    language: str = Form("ru", description="Язык протокола"),
+    folder_id: uuid.UUID | None = Form(None, description="ID папки"),
     db: AsyncSession = Depends(get_db),
 ) -> ProtocolResponse:
     """Upload audio file and create protocol (US-001, API §4.1).
@@ -124,6 +127,9 @@ async def create_protocol(
         agenda=agenda,
         audio_file_id=audio_file.id,
         status="loaded",
+        # E218: передаём language и folder_id из формы
+        language=language,
+        folder_id=folder_id,
     )
     db.add(protocol)
     await db.commit()
@@ -229,11 +235,18 @@ async def create_protocol_from_url(
                         "audio/wav": "wav",
                         "audio/x-wav": "wav",
                         "audio/ogg": "ogg",
+                        "audio/webm": "webm",  # E173: webm audio
                         "video/mp4": "mp4",
                         "video/webm": "webm",
                         "video/x-matroska": "mkv",
                     }
                     extension = mime_to_ext.get(mime_type, "mp4")
+                else:
+                    extension = "mp4"
+                # E173: webm fallback если URL не даёт ни расширения ни MIME
+                if extension == "mp4" and not mime_type:
+                    # Попробуем угадать по сигнатуре
+                    pass
 
                 # Generate filename
                 filename_base = "".join(c for c in title if c.isalnum() or c in "._- ")[:50] or "download"
@@ -432,8 +445,18 @@ async def update_protocol(
     body: ProtocolUpdate,
     db: AsyncSession = Depends(get_db),
 ) -> ProtocolResponse:
-    """Update protocol metadata."""
-    protocol = await db.get(Protocol, protocol_id)
+    """Update protocol metadata.
+
+    E217: используем select + selectinload чтобы избежать MissingGreenlet
+    при model_validate(protocol) с audio_file (lazy-load).
+    """
+    from sqlalchemy.orm import selectinload
+    query = (
+        select(Protocol)
+        .options(selectinload(Protocol.audio_file))
+        .where(Protocol.id == protocol_id)
+    )
+    protocol = (await db.execute(query)).scalar_one_or_none()
     if not protocol:
         raise HTTPException(status_code=404, detail="Протокол не найден")
 

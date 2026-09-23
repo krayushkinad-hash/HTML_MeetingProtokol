@@ -62,26 +62,20 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
-# E069: Sync session for use from sync code (e.g., progress_cb from background thread)
-from sqlalchemy.orm import sessionmaker, Session
-SyncSessionLocal = sessionmaker(
-    bind=engine.sync_engine,
-    class_=Session,
-    expire_on_commit=False,
-    autoflush=False,
-)
-
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency: yield AsyncSession per request."""
+    """FastAPI dependency: yield AsyncSession per request.
+
+    E189: убран finally: session.close() — async with сам закрывает сессию.
+    Явный close() после rollback создавал IllegalStateChangeError.
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
+        # finally не нужен — async with сам закроет сессию при выходе
 
 
 @asynccontextmanager
@@ -107,11 +101,12 @@ async def init_db() -> None:
     2. Run Base.metadata.create_all — создаёт новые таблицы
     3. ALTER TABLE ADD COLUMN IF NOT EXISTS — для колонок в существующих таблицах
     """
-    global engine
+    global engine, AsyncSessionLocal
     from sqlalchemy import text
 
-        # ============================================================
-    # Step 0: RESET_DB — опциональный полный сброс (US-XX, dev only!)
+    # ============================================================
+    # Step 0: RESET_DB — опциональный полный сброс (dev only!)
+    # E166: также пересоздаём AsyncSessionLocal чтобы не было UnboundLocalError
     # ============================================================
     if getattr(settings, 'reset_db', False):
         logger.warning("reset_db_enabled_dropping_database")
@@ -121,6 +116,11 @@ async def init_db() -> None:
         # Закрыть engine и пересоздать
         await engine.dispose()
         engine = create_async_engine(settings.database_url)
+        # E166: пересоздать sessionmaker для нового engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession as _AS
+        AsyncSessionLocal = async_sessionmaker(
+            engine, class_=_AS, expire_on_commit=False,
+        )
         logger.warning("reset_db_database_recreated")
 
     try:
@@ -265,13 +265,29 @@ async def init_db() -> None:
                         pass
 
         # Step 5: Final commit + then SELECT in a NEW session (after all DDL committed)
-        async with AsyncSessionLocal() as session:
-            from sqlalchemy import select as _select
-            result = await session.execute(_select(UserSetting))
-            if not result.scalar_one_or_none():
-                session.add(UserSetting())
-                await session.commit()
-                logger.info("initial_user_setting_created")
+        # E255: явная проверка что user_setting существует через простой count(*)
+        # вместо SELECT * — иначе падает если есть колонки которых нет в БД
+        try:
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import text as _text
+                result = await session.execute(_text("SELECT count(*) FROM user_setting"))
+                count = result.scalar()
+                if not count:
+                    from app.core.config import settings as _s
+                    session.add(UserSetting(
+                        llm_provider=_s.llm_provider if hasattr(_s, 'llm_provider') else 'hermes',
+                        whisper_model='base',
+                        theme='auto',
+                    ))
+                    await session.commit()
+                    logger.info("initial_user_setting_created")
+        except Exception as e:
+            logger.warning("initial_user_setting_check_failed", error=str(e))
+            # Rollback чтобы сессия не была в broken состоянии
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
         # Step 5b: Migrate legacy audio_file records (US-070)
         # Old code saved as "source.{ext}", new code uses real filename.
@@ -323,7 +339,8 @@ async def init_db() -> None:
                 stuck_result = await session.execute(
                     update(_Protocol)
                     .where(_Protocol.status == "transcribing")
-                    .values(status="loaded", duration_sec=None)
+                    # E196: убрал duration_sec=None — теряем информацию о длительности
+                    .values(status="loaded")
                     .returning(_Protocol.id)
                 )
                 stuck_ids = [r[0] for r in stuck_result.fetchall()]
@@ -336,19 +353,6 @@ async def init_db() -> None:
                     logger.debug("no_stuck_transcriptions")
         except Exception as e:
             logger.warning("stuck_transcription_reset_failed", error=str(e))
-
-
-async def _add_column_if_not_exists(conn, table: str, column: str, col_type: str) -> None:
-    """PostgreSQL: ADD COLUMN IF NOT EXISTS (since 9.6)."""
-    from sqlalchemy import text
-    try:
-        await conn.execute(text(
-            f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{column}" {col_type}'
-        ))
-        logger.info("column_added", table=table, column=column)
-    except Exception as e:
-        logger.warning("column_add_skipped",
-                       table=table, column=column, error=str(e))
 
 
 async def close_db() -> None:

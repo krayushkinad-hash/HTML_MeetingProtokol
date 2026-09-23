@@ -3,7 +3,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+# E194: Field и field_validator не используются — убраны
+# (Pydantic Settings поддерживает Field через Annotated[], но мы не используем)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,15 +54,26 @@ class Settings(BaseSettings):
     ollama_timeout: int = 60
 
     # Whisper (ADR-005)
-    whisper_model: Literal["tiny", "base", "small", "medium", "large-v3"] = "large-v3"
+    # E184: large-v3 НЕ должна быть по умолчанию.
+    # Default = "base" — баланс скорости и качества.
+    # Пользователь явно выбирает large-v3 для максимального качества,
+    # осознавая что это занимает 5-6 GB RAM и долго на CPU.
+    whisper_model: Literal["tiny", "base", "small", "medium", "large-v3"] = "base"
     # E111: Default CPU — cuda требует cudnn64_9.dll в PATH,
     # иначе Could not locate cudnn_ops64_9.dll.
     # Если у вас настроен CUDA + cudnn — установите в .env: WHISPER_DEVICE=cuda
     whisper_device: Literal["cuda", "cpu"] = "cpu"
     whisper_compute_type: Literal["float16", "int8", "float32"] = "int8"
+    # E187: число CPU threads для Whisper. Default 0 = auto (использует все ядра).
+    # Для CPU рекомендуется 4-8 для баланса скорости/памяти.
+    whisper_cpu_threads: int = 8
+    # E190: использовать BatchedInferencePipeline (требует faster_whisper>=1.0).
+    # Ускоряет обработку длинных аудио в 2-3x, но требует больше памяти.
+    whisper_use_batched_pipeline: bool = False
     # E111: VAD удаляет тишину, но иногда удаляет и речь.
     # По умолчанию OFF чтобы не терять данные.
-    whisper_vad_filter: bool = False
+    # E236: VAD отсекает тишину и предотвращает галлюцинации Whisper
+    whisper_vad_filter: bool = True
 
     # E118: VAD параметры (для тонкой настройки чувствительности)
     vad_min_silence_duration_ms: int = 1000   # Минимальная пауза для обрезки
@@ -86,7 +98,8 @@ class Settings(BaseSettings):
     gigachat_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
 
     # Memory monitoring (NFR §QG-7, ADR-010)
-    rss_limit_mb: int = 4096
+    # E183: large-v3 на CPU жрёт 5-6 GB. Ставим 8 GB по умолчанию.
+    rss_limit_mb: int = 8192
     rss_check_interval_sec: int = 5
 
     # Telegram Bot

@@ -11,7 +11,8 @@
 import { api, ApiError } from '../api/client.js';
 import { storage, STORES } from '../storage/indexeddb.js';
 import { toast } from '../utils/toast.js';
-import './components/video-player.js';
+// E180: удалён импорт './components/video-player.js' — старый custom element
+// дублировал плеер (E175). Используется только initMediaPlayer().
 import './components/tab-bar.js';
 import './components/modal.js';
 import './components/empty-state.js';
@@ -123,6 +124,7 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
             <div>
                 <button class="btn" onclick="window.location.hash='#/'" aria-label="Назад к списку">← Назад</button>
                 <h1 style="display:inline-block; margin-left:12px;">${escapeHtml(protocol.title)}</h1>
+                <button class="btn-tiny btn-edit-protocol" id="btn-edit-protocol-meta" title="Редактировать атрибуты протокола">✏️ Редактировать</button>
                 <span class="badge badge-${statusBadge.type}" style="margin-left:8px;">${statusBadge.label}</span>
             </div>
             <div class="actions">
@@ -134,38 +136,43 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
 
         <div class="protocol-meta">
             <span><i class="fa-regular fa-calendar"></i> ${dateStr || 'Дата не указана'}</span>
-            ${protocol.location ? `<span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(protocol.location)}</span>` : ''}
-            ${protocol.chair ? `<span><i class="fa-regular fa-user"></i> ${escapeHtml(protocol.chair)}</span>` : ''}
+            ${protocol.location ? `<span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(protocol.location)}</span>` : '<span><i class="fa-solid fa-location-dot"></i> —</span>'}
+            ${protocol.chair ? `<span><i class="fa-regular fa-user"></i> ${escapeHtml(protocol.chair)}</span>` : '<span><i class="fa-regular fa-user"></i> —</span>'}
             ${protocol.duration_sec ? `<span><i class="fa-regular fa-clock"></i> ${formatDuration(protocol.duration_sec)}</span>` : ''}
             ${protocol.wer_quality !== null ? `<span><i class="fa-solid fa-chart-column"></i> WER: ${protocol.wer_quality}%</span>` : ''}
         </div>
 
         ${protocol.audio_file ? `
-            <div class="file-info">
-                <div class="file-info-main" title="Кликните для просмотра полного пути">
-                    <span class="file-info-icon">${protocol.audio_file.source === 'url' ? '<i class="fa-solid fa-link"></i>' : '<i class="fa-solid fa-paperclip"></i>'}</span>
-                    <span class="file-info-name">${escapeHtml(protocol.audio_file.filename || 'Неизвестный файл')}</span>
-                    <span class="file-info-size">${formatFileSize(protocol.audio_file.size_bytes || 0)}</span>
-                    ${protocol.audio_file.source === 'url' && protocol.audio_file.source_url ?
-                        `<a href="${escapeHtml(protocol.audio_file.source_url)}" target="_blank" class="file-info-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}
-                </div>
-                ${protocol.audio_file.file_path ? `
-                    <div class="file-info-path" title="${escapeHtml(protocol.audio_file.file_path)}">
-                        <span class="file-info-path-label">Путь:</span>
-                        <span class="file-info-path-value">${escapeHtml(formatPath(protocol.audio_file.file_path))}</span>
-                        <button class="btn-copy-path" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Скопировать полный путь"><i class="fa-regular fa-clipboard"></i></button>
-                        <button class="btn-open-folder" data-audio-id="${protocol.audio_file.id}" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Открыть папку с файлом"><i class="fa-regular fa-folder-open"></i></button>
+                    <div class="file-info">
+                        <div class="file-info-main" title="Кликните для просмотра полного пути">
+                            <span class="file-info-icon">${protocol.audio_file.source === 'url' ? '<i class="fa-solid fa-link"></i>' : '<i class="fa-solid fa-paperclip"></i>'}</span>
+                            <span class="file-info-name">${escapeHtml(protocol.audio_file.filename || 'Неизвестный файл')}</span>
+                            <span class="file-info-size">${formatFileSize(protocol.audio_file.size_bytes || 0)}</span>
+                            ${protocol.audio_file.source === 'url' && protocol.audio_file.source_url ?
+                                `<a href="${escapeHtml(protocol.audio_file.source_url)}" target="_blank" class="file-info-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}
+                        </div>
+                        ${protocol.audio_file.file_path ? `
+                            <div class="file-info-path" title="${escapeHtml(protocol.audio_file.file_path)}">
+                                <span class="file-info-path-label">Путь:</span>
+                                <span class="file-info-path-value">${escapeHtml(formatPath(protocol.audio_file.file_path))}</span>
+                                <button class="btn-copy-path" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Скопировать полный путь"><i class="fa-regular fa-clipboard"></i></button>
+                                <button class="btn-open-folder" data-audio-id="${protocol.audio_file.id}" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Открыть папку с файлом"><i class="fa-regular fa-folder-open"></i></button>
+                            </div>
+                        ` : ''}
                     </div>
                 ` : ''}
-            </div>
-        ` : ''}
 
-        <div id="video-container"></div>
+                ${protocol.audio_file ? `
+                    <div id="media-player-container" data-audio-file-id="${protocol.audio_file.id}" data-filename="${escapeHtml(protocol.audio_file.filename || '')}" data-mime="${escapeHtml(protocol.audio_file.mime_type || '')}">
+                        <video id="media-video" controls preload="metadata" style="width:100%; max-height:60vh; background:#000; border-radius:6px;"></video>
+                    </div>
+                ` : ''}
 
         <tab-bar id="protocol-tabs">
             <button role="tab" id="tab-transcript" aria-controls="panel-transcript"><i class="fa-regular fa-note-sticky"></i> Транскрипция</button>
             <button role="tab" id="tab-screenshots" aria-controls="panel-screenshots"><i class="fa-regular fa-image"></i>️ Скриншоты</button>
-            <button role="tab" id="tab-decisions" aria-controls="panel-decisions"><i class="fa-solid fa-check"></i> Решения</button>
+            <button role="tab" id="tab-decisions" aria-controls="panel-decisions"><i class="fa-solid fa-check"></i> Решения <span id="decisions-badge" class="tab-badge"></span></button>
+            <button role="tab" id="tab-important" aria-controls="panel-important"><i class="fa-solid fa-star"></i> Важное <span id="important-badge" class="tab-badge"></span></button>
             <button role="tab" id="tab-tasks" aria-controls="panel-tasks"><i class="fa-regular fa-clipboard"></i> Задачи</button>
             <button role="tab" id="tab-summary" aria-controls="panel-summary"><i class="fa-regular fa-file-lines"></i> Саммари</button>
             <button role="tab" id="tab-speakers" aria-controls="panel-speakers"><i class="fa-solid fa-microphone"></i> Ораторы</button>
@@ -175,7 +182,8 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
             <div role="tabpanel" id="panel-transcript" aria-labelledby="tab-transcript" hidden></div>
             <div role="tabpanel" id="panel-screenshots" aria-labelledby="tab-screenshots" hidden></div>
             <div role="tabpanel" id="panel-decisions" aria-labelledby="tab-decisions" hidden></div>
-            <div role="tabpanel" id="panel-tasks" aria-labelledby="panel-tasks" hidden></div>
+            <div role="tabpanel" id="panel-important" aria-labelledby="tab-important" hidden></div>
+            <div role="tabpanel" id="panel-tasks" aria-labelledby="tab-tasks" hidden></div>
             <div role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" hidden></div>
             <div role="tabpanel" id="panel-speakers" aria-labelledby="tab-speakers" hidden></div>
         </div>
@@ -186,15 +194,10 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
     const safeArray = (arr) => Array.isArray(arr) ? arr : [];
     const safeFilter = (arr, predicate) => safeArray(arr).filter(predicate);
 
-    // Video player
-    if (protocol.audio_file) {
-        const player = document.createElement('video-player');
-        const audioUrl = `${window.__BACKEND_URL__ || "http://127.0.0.1:8000"}/api/v1/hmp/media/protocols/${protocol.id}/source.${protocol.audio_file.extension}`;
-        player.style.width = '100%';
-        rootEl.querySelector('#video-container').appendChild(player);
-        // Загружаем видео после монтирования
-        requestAnimationFrame(() => player.setSource(audioUrl));
-    }
+    // E175: Старый дублированный плеер (video-player) удалён —
+    // теперь используется initMediaPlayer() ниже, который создаёт
+    // один плеер с поддержкой audio и video.
+    // E175: используется initMediaPlayer() — не дублируем.
 
     // Инициализация табов (нужно вызвать addTab для TabBar компонента)
     const tabBar = rootEl.querySelector('tab-bar');
@@ -202,6 +205,8 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
         { id: 'transcript', label: '<i class="fa-regular fa-note-sticky"></i> Транскрипция', badge: utterances.length },
         { id: 'screenshots', label: '<i class="fa-regular fa-image"></i> Скриншоты', badge: screenshots.length },
         { id: 'decisions', label: '<i class="fa-solid fa-check"></i> Решения', badge: decisions.length },
+        // E234: добавлена вкладка "Важное"
+        { id: 'important', label: '<i class="fa-solid fa-star"></i> Важное', badge: safeFilter(utterances, u => u.important).length },
         { id: 'tasks', label: '<i class="fa-regular fa-clipboard"></i> Задачи', badge: safeFilter(actionItems, a => a.status === 'open').length },
         { id: 'summary', label: '<i class="fa-regular fa-file-lines"></i> Саммари', badge: summary ? 1 : 0 },
         { id: 'speakers', label: '<i class="fa-solid fa-microphone"></i> Ораторы', badge: speakers.length },
@@ -210,14 +215,33 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
     tabBar.attachEvents();
     tabBar.activateTab('transcript', true);
 
-    tabBar.onChange(tabId => switchTab(tabId, protocol, utterances, speakers, summary, tags, actionItems));
+    tabBar.onChange(tabId => {
+        switchTab(tabId, protocol, utterances, speakers, summary, tags, actionItems);
+        // E235: перерисовываем содержимое при переключении.
+        // Панели important/decisions рендерятся один раз при загрузке —
+        // после пометки ☆/⚖️ данные устаревают, и пользователь видит старый список.
+        // Здесь перерисовываем из in-memory utterances (они мутируются в обработчиках).
+        if (tabId === 'important') {
+            renderImportantTab(rootEl, protocol, utterances);
+        } else if (tabId === 'decisions') {
+            renderDecisionsTab(rootEl, protocol);
+        }
+    });
 
     // Рендерим все панели (но показываем только активную)
     renderTranscriptTab(rootEl, protocol, utterances, speakers).catch(e =>
         console.warn('renderTranscriptTab:', e),
     );
+    // E233: глобальная ссылка на utterances — используется в appendUtteranceItems
+    // (у которого нет closure utterances), для wireImportantButtons и badge-счётчика.
+    window._currentUtterances = utterances || [];
+
+    // E242: wireEditMetadataBtn — открывает модальное окно редактирования
+    wireEditMetadataBtn(protocol);
+
     renderScreenshotsTab(rootEl, protocol, []);
     renderDecisionsTab(rootEl, protocol);
+    renderImportantTab(rootEl, protocol, utterances);
     renderTasksTab(rootEl, protocol, actionItems);
     renderSummaryTab(rootEl, protocol, summary);
     renderSpeakersTab(rootEl, protocol, speakers, utterances);
@@ -237,6 +261,9 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
             }
         });
     });
+
+    // E170: Инициализация аудио/видео плеера + переход по таймкоду
+    initMediaPlayer(rootEl, protocol);
 
     // Open folder buttons (US-069)
     rootEl.querySelectorAll('.btn-open-folder').forEach(btn => {
@@ -284,6 +311,263 @@ function switchTab(tabId, protocol, utterances, speakers, summary, tags, actionI
 // ────────────────────────────────────────────────────────────
 // Tab renderers (to be expanded in next iteration)
 // ────────────────────────────────────────────────────────────
+
+// E231: модульные wire* функции (для appendUtteranceItems)
+// Каждая берёт utterances из closure через параметр
+
+function wireImportantButtons(utterances, panel) {
+    // E231/E233: fallback на globalThis — appendUtteranceItems не имеет closure utterances
+    if (!utterances || !panel) {
+        utterances = window._currentUtterances || [];
+        panel = panel || document.getElementById('panel-transcript');
+        if (!panel) return;
+    }
+    panel.querySelectorAll('.btn-mark-important:not([data-wired])').forEach(btn => {
+        btn.dataset.wired = '1';
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const utteranceId = btn.dataset.utteranceId;
+            try {
+                btn.disabled = true;
+                await api.toggleUtteranceImportant(utteranceId, true);
+                const u = utterances.find(x => x.id === utteranceId);
+                if (u) u.important = true;
+
+                btn.classList.remove('btn-mark-important');
+                btn.classList.add('btn-important-marked');
+                btn.dataset.wired = '';
+                btn.title = "Снять закладку 'Важное'";
+                btn.innerHTML = '⭐';
+
+                const item = btn.closest('.utterance-item');
+                if (item) {
+                    item.classList.add('is-important');
+                    const textEl = item.querySelector('.utterance-text');
+                    if (textEl && !textEl.querySelector('.important-mark')) {
+                        textEl.insertAdjacentHTML(
+                            'beforeend',
+                            ' <span class="important-mark" title="Важное">⭐</span>'
+                        );
+                    }
+                }
+                toast.success('⭐ Добавлено в "Важное"');
+                wireImportantButtons(utterances, panel);
+                // E235: обновляем badge в табе сразу после пометки
+                const _badge = document.getElementById('important-badge');
+                if (_badge && utterances) {
+                    const cnt = utterances.filter(x => x.important).length;
+                    _badge.textContent = cnt > 0 ? `(${cnt})` : '';
+                }
+            } catch (err) {
+                console.error('[important] create failed:', err);
+                toast.error('Ошибка: ' + (err.message || err));
+                btn.disabled = false;
+            }
+        });
+    });
+
+    panel.querySelectorAll('.btn-important-marked:not([data-wired])').forEach(btn => {
+        btn.dataset.wired = '1';
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const utteranceId = btn.dataset.utteranceId;
+            try {
+                btn.disabled = true;
+                await api.toggleUtteranceImportant(utteranceId, false);
+                const u = utterances.find(x => x.id === utteranceId);
+                if (u) u.important = false;
+
+                btn.classList.remove('btn-important-marked');
+                btn.classList.add('btn-mark-important');
+                btn.dataset.wired = '';
+                btn.title = "Пометить как 'Важное'";
+                btn.innerHTML = '☆';
+
+                const item = btn.closest('.utterance-item');
+                if (item) {
+                    item.classList.remove('is-important');
+                    const textEl = item.querySelector('.important-mark');
+                    if (textEl) textEl.remove();
+                }
+                toast.info('Закладка снята');
+                wireImportantButtons(utterances, panel);
+                // E235: обновляем badge при снятии
+                const _badge2 = document.getElementById('important-badge');
+                if (_badge2 && utterances) {
+                    const cnt = utterances.filter(x => x.important).length;
+                    _badge2.textContent = cnt > 0 ? `(${cnt})` : '';
+                }
+            } catch (err) {
+                console.error('[important] remove failed:', err);
+                toast.error('Ошибка: ' + (err.message || err));
+                btn.disabled = false;
+            }
+        });
+    });
+}
+
+// E242: модальное окно для редактирования атрибутов протокола
+function wireEditMetadataBtn(protocol) {
+    const btn = document.getElementById('btn-edit-protocol-meta');
+    if (!btn || btn.dataset.wired) return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', () => openEditProtocolModal(protocol));
+}
+
+// E242: открывает модалку со всеми атрибутами протокола
+function openEditProtocolModal(protocol) {
+    // Удаляем предыдущую если есть
+    const existing = document.getElementById('edit-protocol-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'edit-protocol-modal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>✏️ Редактировать протокол</h3>
+                <button class="modal-close" type="button" aria-label="Закрыть">×</button>
+            </div>
+            <form id="edit-protocol-form" class="modal-body">
+                <div class="form-group">
+                    <label>Название *</label>
+                    <input type="text" name="title" required maxlength="255"
+                           value="${escapeHtml(protocol.title || '')}" autofocus>
+                </div>
+                <div class="form-group">
+                    <label>Дата</label>
+                    <input type="date" name="date"
+                           value="${protocol.date ? String(protocol.date).slice(0, 10) : ''}">
+                </div>
+                <div class="form-group">
+                    <label>Председатель</label>
+                    <input type="text" name="chair" maxlength="100"
+                           value="${escapeHtml(protocol.chair || '')}"
+                           placeholder="Иванов И.И.">
+                </div>
+                <div class="form-group">
+                    <label>Место проведения</label>
+                    <input type="text" name="location" maxlength="255"
+                           value="${escapeHtml(protocol.location || '')}"
+                           placeholder="Москва, оф. 404">
+                </div>
+                <div class="form-group">
+                    <label>Повестка дня</label>
+                    <textarea name="agenda" rows="4"
+                              placeholder="1. Бюджет Q4&#10;2. Roadmap&#10;3. Команда">${escapeHtml(protocol.agenda || '')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Язык</label>
+                    <select name="language">
+                        <option value="ru" ${(protocol.language || 'ru') === 'ru' ? 'selected' : ''}>Русский</option>
+                        <option value="en" ${protocol.language === 'en' ? 'selected' : ''}>English</option>
+                        <option value="de" ${protocol.language === 'de' ? 'selected' : ''}>Deutsch</option>
+                        <option value="es" ${protocol.language === 'es' ? 'selected' : ''}>Español</option>
+                        <option value="fr" ${protocol.language === 'fr' ? 'selected' : ''}>Français</option>
+                    </select>
+                </div>
+                <div id="edit-protocol-error" class="form-error" hidden></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-cancel" data-action="cancel">Отмена</button>
+                    <button type="submit" class="btn btn-primary" data-action="save">
+                        <i class="fa-regular fa-floppy-disk"></i> Сохранить
+                    </button>
+                </div>
+            </form>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Закрытие
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('[data-action="cancel"]').addEventListener('click', close);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) close();
+    });
+
+    // Submit
+    modal.querySelector('#edit-protocol-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const errEl = modal.querySelector('#edit-protocol-error');
+        const submitBtn = modal.querySelector('[data-action="save"]');
+
+        const changes = {
+            title: form.title.value.trim(),
+            chair: form.chair.value.trim() || null,
+            location: form.location.value.trim() || null,
+            agenda: form.agenda.value.trim() || null,
+            language: form.language.value,
+        };
+        // date — только если изменился
+        const newDate = form.date.value || null;
+        const oldDate = protocol.date ? String(protocol.date).slice(0, 10) : null;
+        if (newDate !== oldDate) changes.date = newDate;
+
+        // Проверка — были ли изменения
+        let hasChanges = false;
+        for (const k of Object.keys(changes)) {
+            const newVal = changes[k];
+            const oldVal = (k === 'date' ? oldDate : protocol[k]) || '';
+            if (newVal !== oldVal) {
+                hasChanges = true;
+                break;
+            }
+        }
+        if (!hasChanges) {
+            close();
+            return;
+        }
+
+        errEl.hidden = true;
+        submitBtn.disabled = true;
+        submitBtn.textContent = '⏳ Сохранение...';
+
+        try {
+            const updated = await api.updateProtocol(protocol.id, changes);
+            // E242: обновляем in-memory протокол и UI
+            Object.assign(protocol, updated);
+            updateProtocolHeader(protocol);
+
+            toast.success('✅ Сохранено');
+            close();
+        } catch (err) {
+            console.error('[edit-protocol] failed:', err);
+            errEl.textContent = `Ошибка: ${err.message || err}`;
+            errEl.hidden = false;
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fa-regular fa-floppy-disk"></i> Сохранить';
+        }
+    });
+}
+
+// E242: обновляет header без перезагрузки
+function updateProtocolHeader(protocol) {
+    const rootEl = document.getElementById('view-root');
+    if (!rootEl) return;
+
+    // Заголовок
+    const h1 = rootEl.querySelector('.protocol-header h1');
+    if (h1) h1.textContent = protocol.title || '';
+
+    // Meta-строка
+    const meta = rootEl.querySelector('.protocol-meta');
+    if (!meta) return;
+
+    const dateStr = protocol.date ? String(protocol.date).slice(0, 10) : '';
+    meta.innerHTML = `
+        <span><i class="fa-regular fa-calendar"></i> ${dateStr || 'Дата не указана'}</span>
+        <span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(protocol.location || '—')}</span>
+        <span><i class="fa-regular fa-user"></i> ${escapeHtml(protocol.chair || '—')}</span>
+        ${protocol.duration_sec ? `<span><i class="fa-regular fa-clock"></i> ${formatDuration(protocol.duration_sec)}</span>` : ''}
+        ${protocol.wer_quality !== null ? `<span><i class="fa-solid fa-chart-column"></i> WER: ${protocol.wer_quality}%</span>` : ''}
+    `;
+
+    // Если есть вкладка протокола — перерисовать summary/decisions/etc.
+    // (пока не трогаем, т.к. там отображается язык, и он изменится через updateProtocol)
+}
 
 async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
     const panel = rootEl.querySelector('#panel-transcript');
@@ -347,14 +631,23 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
         </div>
     `;
 
-    // E146: Привязываем обработчик пометки решения
+    // E171: Привязываем обработчик пометки решения (без outerHTML для надёжности)
     const wireDecisionButtons = () => {
-        panel.querySelectorAll('.btn-mark-decision').forEach(btn => {
+        panel.querySelectorAll('.btn-mark-decision:not([data-wired])').forEach(btn => {
+            btn.dataset.wired = '1';
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
+                // E245: защита от двойного клика — если уже marked, ничего не делаем
+                if (btn.dataset.marked === '1' || btn.disabled) {
+                    console.warn('[decision] already marked, ignoring click');
+                    return;
+                }
                 const utteranceId = btn.dataset.utteranceId;
                 const utterance = utterances.find(u => u.id === utteranceId);
-                if (!utterance) return;
+                if (!utterance) {
+                    console.warn('[decision] utterance not found:', utteranceId);
+                    return;
+                }
 
                 try {
                     btn.disabled = true;
@@ -365,13 +658,22 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
                         priority: 'medium',
                         source: 'transcript',
                     });
-                    // Обновить UI без перерисовки
-                    btn.outerHTML = `<button class="btn-tiny btn-decision-marked" data-utterance-id="${utteranceId}" title="Снять пометку решения">⚖️</button>`;
-                    btn.parentElement?.parentElement?.parentElement?.classList.add('is-decision');
+
+                    // E245: сохраняем decisionId на кнопке чтобы знать что удалять
+                    btn.dataset.decisionId = decision.id;
+
+                    // E171: переключаем классы вместо outerHTML
+                    btn.classList.remove('btn-mark-decision');
+                    btn.classList.add('btn-decision-marked');
+                    btn.dataset.marked = '1';
+                    btn.disabled = false;
+                    btn.title = 'Снять пометку решения';
+                    btn.innerHTML = '⚖️';
+
+                    // Подсветить реплику и добавить ⚖️
                     const item = btn.closest('.utterance-item');
                     if (item) {
                         item.classList.add('is-decision');
-                        // Найти .utterance-text и добавить ⚖️
                         const textEl = item.querySelector('.utterance-text');
                         if (textEl && !textEl.querySelector('.decision-mark')) {
                             textEl.insertAdjacentHTML(
@@ -380,45 +682,83 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
                             );
                         }
                     }
-                    wireDecisionButtons();
                     toast.success('Помечено как решение');
+                    // E171: перепривязываем — теперь у этой кнопки btn-decision-marked
+                    wireDecisionButtons();
+                    // E245: обновляем badge решений в табе
+                    updateDecisionsBadge(panel);
                 } catch (err) {
+                    console.error('[decision] create failed:', err);
                     toast.error(`Не удалось: ${err.message || err}`);
                     btn.disabled = false;
                 }
             });
         });
 
-        panel.querySelectorAll('.btn-decision-marked').forEach(btn => {
+        panel.querySelectorAll('.btn-decision-marked:not([data-wired])').forEach(btn => {
+            btn.dataset.wired = '1';
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
+                // E245: защита от двойного клика
+                if (btn.disabled) {
+                    console.warn('[decision] already processing, ignoring click');
+                    return;
+                }
                 const utteranceId = btn.dataset.utteranceId;
                 try {
                     btn.disabled = true;
-                    // Найти decision_id по utterance_id
-                    const decisions = await api.listDecisions(protocol.id);
-                    const decision = decisions.find(d => d.source_utterance_id === utteranceId);
-                    if (decision) {
-                        await api.deleteDecision(decision.id);
+                    // E245: используем кешированный decisionId — не делаем лишний GET
+                    const decisionId = btn.dataset.decisionId;
+                    if (decisionId) {
+                        await api.deleteDecision(decisionId);
+                    } else {
+                        // fallback: ищем через list (старая логика)
+                        const decisions = await api.listDecisions(protocol.id);
+                        const decision = decisions.find(d => d.source_utterance_id === utteranceId);
+                        if (decision) {
+                            await api.deleteDecision(decision.id);
+                        } else {
+                            console.warn('[decision] no decisionId and not found in list');
+                        }
                     }
-                    btn.outerHTML = `<button class="btn-tiny btn-mark-decision" data-utterance-id="${utteranceId}" title="Пометить как решение">＋ ⚖️</button>`;
+                    // E171: переключаем обратно через классы
+                    btn.classList.remove('btn-decision-marked');
+                    btn.classList.add('btn-mark-decision');
+                    btn.dataset.wired = '';
+                    btn.dataset.marked = '';
+                    delete btn.dataset.decisionId;
+                    btn.disabled = false;
+                    btn.title = 'Пометить как решение';
+                    btn.innerHTML = '＋ ⚖️';
+
                     const item = btn.closest('.utterance-item');
                     if (item) {
                         item.classList.remove('is-decision');
                         const mark = item.querySelector('.decision-mark');
                         if (mark) mark.remove();
                     }
-                    wireDecisionButtons();
                     toast.info('Пометка снята');
+                    // E171: перепривязываем
+                    wireDecisionButtons();
+                    // E245: обновляем badge
+                    updateDecisionsBadge(panel);
                 } catch (err) {
+                    console.error('[decision] delete failed:', err);
                     toast.error(`Не удалось: ${err.message || err}`);
                     btn.disabled = false;
                 }
             });
         });
-    };
+    }
 
-    wireDecisionButtons();
+    // E245: обновляет badge "Решения" в табе
+    updateDecisionsBadge(panel);
+
+    // E171: привязываем обработчики пометки решений
+    wireDecisionButtons();   // E248: добавлен вызов — был потерян
+
+    // E231: wireImportantButtons вынесена в модульную функцию (выше) — вызываем её
+    wireImportantButtons(utterances, panel);
 
     // E154: Inline-edit + grammar/spelling check
     const wireGrammarAndEditButtons = () => {
@@ -758,18 +1098,11 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
         });
     }
 
-    // Обработчик кликов на timestamp (jump to moment in audio)
+    // E231: убрана обработка timestamp здесь — она в initMediaPlayer.wireTimestampClicks
+    // (с защитой через cloneNode + replaceWith, чтобы избежать дублей при повторных рендерах).
+    // Если audioPlayer не инициализирован — fallback через audio-seek event.
     panel.querySelectorAll('.timestamp').forEach(ts => {
-        ts.addEventListener('click', () => {
-            const sec = parseFloat(ts.dataset.time);
-            if (window.audioPlayer && window.audioPlayer.seekTo) {
-                window.audioPlayer.seekTo(sec);
-                toast.info(`Перемотано на ${formatTimestamp(sec)}`);
-            } else {
-                // Fallback: dispatch event
-                window.dispatchEvent(new CustomEvent('audio-seek', { detail: { sec } }));
-            }
-        });
+        // Никаких обработчиков здесь. См. initMediaPlayer.
     });
 
     // Двойной клик → редактирование (заглушка)
@@ -970,10 +1303,14 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
                                     ` <span class="decision-mark" title="AI: ${dec.rationale || 'решение'}">⚖️</span>`
                                 );
                             }
-                            // Меняем кнопку на помеченную
+                            // E171: меняем кнопку на помеченную через классы
                             const btn = item.querySelector('.btn-mark-decision');
                             if (btn) {
-                                btn.outerHTML = `<button class="btn-tiny btn-decision-marked" data-utterance-id="${dec.source_utterance_id}" title="Снять">⚖️</button>`;
+                                btn.classList.remove('btn-mark-decision');
+                                btn.classList.add('btn-decision-marked');
+                                btn.dataset.wired = '';
+                                btn.title = 'Снять пометку решения';
+                                btn.innerHTML = '⚖️';
                             }
                         }
                     }
@@ -1174,6 +1511,11 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
                 list.innerHTML = utterances
                     .map(u => renderUtteranceItem(u, speakers))
                     .join('');
+                // E234: после innerHTML старые обработчики потеряны.
+                // Перепривязываем — иначе ☆/⚖️/✏️/🔍 не работают.
+                wireDecisionButtons();
+                wireImportantButtons(utterances, panel);
+                wireGrammarAndEditButtons();
             }
         } catch (e) {
             console.warn('Failed to load speakers:', e);
@@ -1229,7 +1571,10 @@ function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds =
     const startTime = formatTimestamp(u.start_sec);
     const conf = u.confidence ?? 1.0;
     const confClass = conf < 0.4 ? 'danger' : conf < 0.7 ? 'warning' : 'success';
-    const lowConfIcon = u.low_confidence ? ' <span title="Низкая уверенность" style="color:#f59e0b;">[?]</span>' : '';
+    // E231: улучшенная иконка low confidence — кликабельная, открывает апгрейд
+    const lowConfIcon = u.low_confidence
+        ? ` <span class="low-conf-mark" title="Низкая уверенность (${(conf * 100).toFixed(0)}%). Кликните для upgrade." style="color:#f59e0b; cursor:help;">⚠️</span>`
+        : '';
     const isDecision = decisionIds && decisionIds.has(u.id);
     const decisionIcon = isDecision
         ? '<span class="decision-mark" title="Решение">⚖️</span>'
@@ -1240,6 +1585,10 @@ function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds =
     // E154: редактирование + проверка грамматики
     const editBtn = `<button class="btn-tiny btn-edit-utterance" data-utterance-id="${u.id}" title="Редактировать"><i class="fa-regular fa-pen-to-square"></i></button>`;
     const grammarBtn = `<button class="btn-tiny btn-check-grammar" data-utterance-id="${u.id}" title="Проверить орфографию/грамматику">🔍</button>`;
+    // E172: Закладка "Важное"
+    const importantBtn = u.important
+        ? `<button class="btn-tiny btn-important-marked" data-utterance-id="${u.id}" title="Снять закладку 'Важное'">⭐</button>`
+        : `<button class="btn-tiny btn-mark-important" data-utterance-id="${u.id}" title="Пометить как 'Важное'">☆</button>`;
     // E149: отображение перевода (если есть)
     const translationBlock = u.translation_text
         ? `<div class="utterance-translation"><i class="fa-solid fa-language"></i> <span class="translation-label">${escapeHtml(u.translation_language || '?')}:</span> ${escapeHtml(u.translation_text)}</div>`
@@ -1254,7 +1603,7 @@ function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds =
         </div>`
         : '';
     return `
-        <div class="utterance-item ${isDecision ? 'is-decision' : ''} ${u._has_issues ? 'has-issues' : ''}" data-id="${u.id}" tabindex="0">
+        <div class="utterance-item ${isDecision ? 'is-decision' : ''} ${u._has_issues ? 'has-issues' : ''} ${u.important ? 'is-important' : ''}" data-id="${u.id}" tabindex="0">
             <div class="utterance-meta">
                 <span class="speaker-badge" style="background:${speakerColor};" title="${escapeHtml(speakerName)}">${escapeHtml(speakerName)}</span>
                 <span class="timestamp" data-time="${u.start_sec}">${startTime}</span>
@@ -1262,12 +1611,13 @@ function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds =
                     <span class="conf-fill conf-${confClass}" style="width:${conf * 100}%"></span>
                 </span>
                 <span class="utterance-actions">
+                    ${importantBtn}
                     ${actionBtn}
                     ${editBtn}
                     ${grammarBtn}
                 </span>
             </div>
-            <div class="utterance-text" data-original="${escapeHtml(u.text)}">${escapeHtml(u.text)}${lowConfIcon}${decisionIcon}</div>
+            <div class="utterance-text" data-original="${escapeHtml(u.text)}">${escapeHtml(u.text)}${lowConfIcon}${decisionIcon}${u.important ? ' <span class="important-mark" title="Важное">⭐</span>' : ''}</div>
             ${issuesBlock}
             ${translationBlock}
         </div>
@@ -1387,17 +1737,190 @@ async function renderDecisionsTab(rootEl, protocol) {
     panel.querySelectorAll('.btn-delete-decision').forEach(btn => {
         btn.addEventListener('click', async () => {
             const id = btn.dataset.id;
+            const card = btn.closest('.decision-card');
+            const utteranceId = card?.dataset.utteranceId;
             try {
                 await api.deleteDecision(id);
-                btn.closest('.decision-card').remove();
+                card.remove();
                 if (!panel.querySelector('.decision-card')) {
                     panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-check"></i>" title="Список решений пуст"></empty-state>`;
                 }
+                // E245: обновляем кнопку в транскрипте (если она там)
+                if (utteranceId) {
+                    syncDecisionButtonInTranscript(utteranceId, false);
+                }
+                // E245: обновляем badge
+                const cnt = panel.querySelectorAll('.btn-decision-marked').length;
+                const badge = document.getElementById('decisions-badge');
+                if (badge) badge.textContent = cnt > 0 ? `(${cnt})` : '';
                 toast.success('Решение удалено');
             } catch (e) {
                 toast.error(`Не удалось: ${e.message || e}`);
             }
         });
+    });
+}
+
+// E245: синхронизирует кнопку ⚖️ в транскрипте с состоянием в БД.
+// marked=true → показывает ⚖️ (нельзя добавить ещё раз).
+// marked=false → показывает ＋⚖️ (можно добавить).
+function syncDecisionButtonInTranscript(utteranceId, marked) {
+    // Ищем все кнопки с этим utteranceId в обеих вариантах (на случай дублей после polling)
+    const buttons = document.querySelectorAll(`.btn-mark-decision[data-utterance-id="${utteranceId}"], .btn-decision-marked[data-utterance-id="${utteranceId}"]`);
+    buttons.forEach(btn => {
+        if (marked) {
+            // Пометить
+            btn.classList.remove('btn-mark-decision');
+            btn.classList.add('btn-decision-marked');
+            btn.dataset.marked = '1';
+            btn.dataset.wired = '';
+            btn.title = 'Снять пометку решения';
+            btn.innerHTML = '⚖️';
+        } else {
+            // Снять пометку
+            btn.classList.remove('btn-decision-marked');
+            btn.classList.add('btn-mark-decision');
+            btn.dataset.marked = '';
+            delete btn.dataset.decisionId;
+            btn.title = 'Пометить как решение';
+            btn.innerHTML = '＋ ⚖️';
+        }
+    });
+
+    // Подсветка реплики
+    const items = document.querySelectorAll(`.utterance-item[data-id="${utteranceId}"]`);
+    items.forEach(item => {
+        if (marked) {
+            item.classList.add('is-decision');
+            const textEl = item.querySelector('.utterance-text');
+            if (textEl && !textEl.querySelector('.decision-mark')) {
+                textEl.insertAdjacentHTML('beforeend',
+                    ' <span class="decision-mark" title="Решение">⚖️</span>');
+            }
+        } else {
+            item.classList.remove('is-decision');
+            const mark = item.querySelector('.decision-mark');
+            if (mark) mark.remove();
+        }
+    });
+}
+
+// E232: вкладка "Важное" — список помеченных реплик
+function renderImportantTab(rootEl, protocol, allUtterances) {
+    const panel = rootEl.querySelector('#panel-important');
+    if (!panel) {
+        console.warn('[renderImportantTab] panel-important not found');
+        return;
+    }
+
+    const importantUtterances = (allUtterances || []).filter(u => u.important);
+
+    // E233: отладка — лог в консоль
+    console.log('[renderImportantTab]',
+        'allUtterances:', allUtterances?.length || 0,
+        'importantUtterances:', importantUtterances.length,
+        'allUtterances[0]?.important:', allUtterances?.[0]?.important,
+    );
+
+    // Обновляем badge в табе
+    const badge = document.getElementById('important-badge');
+    if (badge) {
+        badge.textContent = importantUtterances.length > 0 ? `(${importantUtterances.length})` : '';
+    }
+
+    if (importantUtterances.length === 0) {
+        panel.innerHTML = `
+            <empty-state
+                icon='<i class="fa-solid fa-star"></i>'
+                title="Нет важных реплик"
+                description="Нажмите ☆ рядом с репликой в транскрипте, чтобы добавить её в избранное"
+            ></empty-state>
+        `;
+        return;
+    }
+
+    // Сортируем по start_sec
+    importantUtterances.sort((a, b) => (a.start_sec || 0) - (b.start_sec || 0));
+
+    // E232: используем renderUtteranceItem (тот же рендер что и в транскрипте)
+    // Но с временем и важным в начале
+    const html = importantUtterances.map(u => renderUtteranceItem(u, [])).join('');
+    panel.innerHTML = `
+        <div class="transcript-toolbar">
+            <span class="text-muted">${importantUtterances.length} важн${importantUtterances.length === 1 ? 'ая' : 'ых'}</span>
+            <button class="btn-tiny" id="btn-clear-important">🗑 Снять все</button>
+        </div>
+        <div class="transcript-list">${html}</div>
+    `;
+
+    // Привязываем обработчики (важное уже помечено как важное — клик снимает)
+    wireImportantButtons(allUtterances, panel);
+
+    // Кнопка "снять все"
+    panel.querySelector('#btn-clear-important')?.addEventListener('click', async () => {
+        if (!confirm(`Снять пометку "Важное" со всех ${importantUtterances.length} реплик?`)) return;
+        try {
+            for (const u of importantUtterances) {
+                await api.toggleUtteranceImportant(u.id, false);
+                u.important = false;
+                // E245: синхронизируем кнопки в транскрипте
+                syncImportantButtonInTranscript(u.id, false);
+            }
+            toast.info('Закладки сняты');
+            renderImportantTab(rootEl, protocol, allUtterances);
+            // Обновляем счётчик в табе
+            const badge = document.getElementById('important-badge');
+            if (badge) badge.textContent = '';
+        } catch (e) {
+            toast.error(`Не удалось: ${e.message || e}`);
+        }
+    });
+}
+
+// E245: синхронизирует кнопку ☆/⭐ в транскрипте с состоянием в БД
+// E248: updateDecisionsBadge определена здесь (модульная область) — иначе ReferenceError
+function updateDecisionsBadge(panel) {
+    if (!panel) panel = document.getElementById('panel-transcript');
+    if (!panel) return;
+    const badge = document.getElementById('decisions-badge');
+    if (!badge) return;
+    const cnt = panel.querySelectorAll('.btn-decision-marked').length;
+    badge.textContent = cnt > 0 ? `(${cnt})` : '';
+}
+
+function syncImportantButtonInTranscript(utteranceId, marked) {
+    const buttons = document.querySelectorAll(`.btn-mark-important[data-utterance-id="${utteranceId}"], .btn-important-marked[data-utterance-id="${utteranceId}"]`);
+    buttons.forEach(btn => {
+        if (marked) {
+            btn.classList.remove('btn-mark-important');
+            btn.classList.add('btn-important-marked');
+            btn.dataset.marked = '1';
+            btn.dataset.wired = '';
+            btn.title = "Снять закладку 'Важное'";
+            btn.innerHTML = '⭐';
+        } else {
+            btn.classList.remove('btn-important-marked');
+            btn.classList.add('btn-mark-important');
+            btn.dataset.marked = '';
+            btn.title = "Пометить как 'Важное'";
+            btn.innerHTML = '☆';
+        }
+    });
+
+    const items = document.querySelectorAll(`.utterance-item[data-id="${utteranceId}"]`);
+    items.forEach(item => {
+        if (marked) {
+            item.classList.add('is-important');
+            const textEl = item.querySelector('.utterance-text');
+            if (textEl && !textEl.querySelector('.important-mark')) {
+                textEl.insertAdjacentHTML('beforeend',
+                    ' <span class="important-mark" title="Важное">⭐</span>');
+            }
+        } else {
+            item.classList.remove('is-important');
+            const mark = item.querySelector('.important-mark');
+            if (mark) mark.remove();
+        }
     });
 }
 
@@ -1436,9 +1959,10 @@ function renderSummaryTab(rootEl, protocol, summary) {
         if (btn) btn.addEventListener('click', () => createSummary(protocol));
         return;
     }
+    // E230: fallback на '—' если generated_at отсутствует
     panel.innerHTML = `
         <div class="summary-header">
-            <span class="text-muted">Провайдер: ${summary.provider} · ${summary.tokens_used || '?'} токенов · ${new Date(summary.generated_at).toLocaleString('ru-RU')}</span>
+            <span class="text-muted">Провайдер: ${summary.provider} · ${summary.tokens_used || '?'} токенов · ${summary.generated_at ? new Date(summary.generated_at).toLocaleString('ru-RU') : '—'}</span>
             <button class="btn" id="btn-regenerate">🔄 Регенерировать</button>
         </div>
         <div class="summary-content">${renderMarkdown(summary.text)}</div>
@@ -1611,10 +2135,61 @@ async function startTranscribe(protocol) {
     }
     _startTranscribeLock = true;
     try {
+        // E184: модель берётся из настроек Whisper (Settings → Whisper Models → Active).
+        // Backend использует settings.whisper_model по умолчанию.
+        // Пользователь явно выбирает модель в разделе "Whisper модели".
         toast.info('Запуск транскрипции...');
+
+        // E241: очищаем UI от старых результатов ДО запроса — пользователь
+        // видит "чистую" страницу сразу, не дожидаясь backend DELETE.
+        clearTranscriptionUI(protocol);
+
+        // E243: получаем настройки из user_setting
+        // На скрине пользователь выбирает "Medium" — должна использоваться Medium.
+        let selectedModel;
+        let remoteEnabled = false;
+        let remoteUrl = '';
+        let remotePath = '/transcribe';
+        try {
+            const us = await api.getUserSetting();
+            selectedModel = us?.whisper_model;
+            remoteEnabled = us?.whisper_remote_enabled === true;
+            remoteUrl = (us?.whisper_remote_url || '').trim();
+            remotePath = (us?.whisper_remote_path || '/transcribe').trim();
+            // Кешируем
+            if (selectedModel) {
+                try { localStorage.setItem('hmp.whisper_model', selectedModel); } catch {}
+            } else {
+                try { selectedModel = localStorage.getItem('hmp.whisper_model'); } catch {}
+            }
+            try { localStorage.setItem('hmp.whisper_remote', JSON.stringify({ enabled: remoteEnabled, url: remoteUrl, path: remotePath })); } catch {}
+        } catch (e) {
+            console.warn('[startTranscribe] failed to load user_setting:', e);
+            try { selectedModel = localStorage.getItem('hmp.whisper_model'); } catch {}
+            try {
+                const cached = JSON.parse(localStorage.getItem('hmp.whisper_remote') || '{}');
+                remoteEnabled = !!cached.enabled;
+                remoteUrl = cached.url || '';
+                remotePath = cached.path || '/transcribe';
+            } catch {}
+        }
+
+        // E252: если включён удалённый Whisper — отправляем напрямую на remote сервер
+        if (remoteEnabled && remoteUrl) {
+            console.log('[startTranscribe] using REMOTE Whisper:', remoteUrl + remotePath);
+            await transcribeRemote({
+                url: remoteUrl,
+                path: remotePath,
+                model: selectedModel || 'base',
+                language: 'ru',
+                protocol,
+            });
+            return;
+        }
+
         const response = await api.startTranscription({
             protocol_id: protocol.id,
-            model: 'large-v3',
+            model: selectedModel,  // E243: реальная модель из user_setting
             language: 'ru',
         });
 
@@ -1645,6 +2220,241 @@ async function startTranscribe(protocol) {
     }
 }
 
+// E253: транскрибация через удалённый Whisper с честным прогрессом
+async function transcribeRemote({ protocol, url, path, model, language }) {
+    if (!protocol) {
+        toast.error('Нет протокола для транскрибации');
+        return null;
+    }
+
+    const remoteEndpoint = (url || '').replace(/\/$/, '') + (path || '/transcribe');
+    const progressBar = ensureRemoteProgressBar();
+    setRemoteProgress(progressBar, 0, 'Подключение к удалённому Whisper…');
+    toast.info(`Отправляю на удалённый Whisper (${model})…`);
+    console.log('[transcribeRemote] target:', remoteEndpoint, 'via', `/api/v1/hmp/transcribe/remote`);
+
+    try {
+        setRemoteProgress(progressBar, 15, 'Локальный backend читает аудио и шлёт на удалённый сервер…');
+
+        // E264: через proxy endpoint локального backend — обходит Mixed Content
+        // E265: пробуем несколько базовых URL backend И разные endpoints
+        const apiBases = [
+            'http://127.0.0.1:8000',  // основной
+            'http://localhost:8000',    // запасной
+            '',                          // same-origin (если открыто через :8000 или proxy есть)
+        ];
+        const endpointPaths = ['/api/v1/hmp/remote'];  // единственный реально существующий роут
+
+        let response = null;
+        let lastErr = null;
+        outer:
+        for (const base of apiBases) {
+            for (const path of endpointPaths) {
+                const endpoint = `${base}${path}`;
+                console.log('[transcribeRemote] trying endpoint:', endpoint);
+                let r;
+                try {
+                    // E278: создаём FormData заранее — иначе Content-Length не считается
+                    const form = new FormData();
+                    form.append('protocol_id', protocol.id);
+                    form.append('target_url', url);
+                    form.append('target_path', path || '/transcribe');
+                    form.append('model', model || 'base');
+                    form.append('language', language || 'ru');
+                    r = await fetch(endpoint, {
+                        method: 'POST',
+                        body: form,
+                    });
+                } catch (fetchErr) {
+                    console.warn('[transcribeRemote] fetch failed at', endpoint, fetchErr);
+                    lastErr = endpoint + ': ' + fetchErr.message;
+                    continue;
+                }
+                if (r.status === 404) {
+                    console.warn('[transcribeRemote] 404 at', endpoint, '→ next');
+                    lastErr = endpoint + ': 404';
+                    continue;
+                }
+                if (r.status === 501 && (r.headers.get('content-type') || '').includes('html')) {
+                    console.warn('[transcribeRemote] 501 HTML (Vite без proxy) at', endpoint, '→ next');
+                    lastErr = endpoint + ': 501 HTML';
+                    continue;
+                }
+                if (r.status >= 500) {
+                    // E275: показать traceback для 500+ ошибок
+                    const txt = await r.text();
+                    console.error(`[transcribeRemote] ${endpoint} → ${r.status}:`, txt.slice(0, 800));
+                    lastErr = endpoint + ': ' + r.status + ' ' + txt.slice(0, 200);
+                    continue;
+                }
+                if (!r.ok) {
+                    const txt = await r.text();
+                    lastErr = endpoint + ': ' + r.status + ' ' + txt.slice(0, 200);
+                    continue;
+                }
+                response = r;
+                break outer;
+            }
+        }
+
+        if (!response) {
+            throw new Error('Не удалось вызвать /transcribe/remote через ни одну из баз. Последняя: ' + lastErr);
+        }
+
+        if (!response.ok) {
+            const txt = await response.text();
+            throw new Error(`Remote proxy ${response.status}: ${txt.slice(0, 200)}`);
+        }
+
+        const result = await response.json();
+        console.log('[transcribeRemote] result:', result);
+
+        setRemoteProgress(progressBar, 75, `Получено ${result.segments_created} реплик, обновляю UI…`);
+
+        // Загружаем utterances и перерисовываем
+        const fresh = await api.listUtterances(protocol.id, { limit: 500 });
+        const items = fresh?.items || fresh || [];
+        const transcriptList = document.querySelector('#panel-transcript .transcript-list');
+        if (transcriptList && items.length) {
+            transcriptList.innerHTML = items.map(u => renderUtteranceItem(u, [])).join('');
+            wireImportantButtons(items, document.getElementById('panel-transcript'));
+            wireDecisionButtons();
+        }
+        window._currentUtterances = items;
+
+        setRemoteProgress(progressBar, 100, `✅ Готово: ${result.segments_created} реплик`);
+        toast.success(`Удалённый Whisper вернул ${result.segments_created} реплик`);
+        setTimeout(() => hideRemoteProgress(progressBar), 3000);
+
+        return result;
+
+    } catch (err) {
+        console.error('[transcribeRemote] failed:', err);
+        setRemoteProgress(progressBar, 0, '❌ ' + (err.message || err));
+        toast.error(`Удалённый Whisper: ${err.message || err}`);
+        setTimeout(() => hideRemoteProgress(progressBar), 5000);
+        return null;
+    }
+}
+ // E253: создаёт (если нет) отдельный прогресс-бар для remote
+function ensureRemoteProgressBar() {
+    let bar = document.getElementById('remote-transcribe-progress');
+    if (bar) return bar;
+    bar = document.createElement('div');
+    bar.id = 'remote-transcribe-progress';
+    bar.className = 'transcribe-progress-remote';
+    bar.innerHTML = `
+        <div class="remote-progress-header">
+            <i class="fa-solid fa-cloud"></i> Удалённый Whisper
+            <span class="remote-progress-pct">0%</span>
+        </div>
+        <div class="remote-progress-track"><div class="remote-progress-fill"></div></div>
+        <div class="remote-progress-msg">Подготовка…</div>
+    `;
+    document.body.appendChild(bar);
+    return bar;
+}
+
+function setRemoteProgress(bar, pct, msg) {
+    if (!bar) return;
+    const fill = bar.querySelector('.remote-progress-fill');
+    const pctEl = bar.querySelector('.remote-progress-pct');
+    const msgEl = bar.querySelector('.remote-progress-msg');
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (pctEl) pctEl.textContent = `${Math.round(pct)}%`;
+    if (msgEl) msgEl.textContent = msg || '';
+    bar.style.display = '';
+}
+
+function hideRemoteProgress(bar) {
+    if (!bar) return;
+    bar.style.display = 'none';
+}
+
+// E253: сохраняет результат удалённого Whisper на локальный backend с прогрессом
+async function saveRemoteResultToBackend(protocol, data, onProgress) {
+    try {
+        const segs = data.segments || [];
+        if (!segs.length) {
+            console.warn('[saveRemoteResultToBackend] no segments to save');
+            return;
+        }
+
+        // Этап 3a: создаём utterances по одному (0..80% сохранения)
+        const total = segs.length;
+        let saved = 0;
+        for (const seg of segs) {
+            try {
+                await api.createUtterance(protocol.id, {
+                    start_sec: seg.start,
+                    end_sec: seg.end,
+                    text: seg.text,
+                });
+            } catch (e) {
+                console.warn('[saveRemoteResultToBackend] createUtterance failed:', e);
+            }
+            saved++;
+            if (onProgress && total > 0) {
+                const pct = Math.round((saved / total) * 80);
+                onProgress(pct, `Сохраняю реплики: ${saved} / ${total}`);
+            }
+        }
+
+        // Этап 3b: перезагружаем utterances (80..100%)
+        if (onProgress) onProgress(90, 'Обновляю список реплик…');
+        const fresh = await api.listUtterances(protocol.id, { limit: 500 });
+        if (fresh?.items || Array.isArray(fresh)) {
+            const items = fresh.items || fresh;
+            window._currentUtterances = items;
+            const transcriptList = document.querySelector('#panel-transcript .transcript-list');
+            if (transcriptList && items.length) {
+                transcriptList.innerHTML = items.map(u => renderUtteranceItem(u, [])).join('');
+                wireImportantButtons(items, document.getElementById('panel-transcript'));
+            }
+        }
+        if (onProgress) onProgress(100, `✅ Сохранено ${total} реплик в БД`);
+    } catch (e) {
+        console.error('[saveRemoteResultToBackend] failed:', e);
+        if (onProgress) onProgress(0, '❌ Ошибка сохранения: ' + (e.message || e));
+    }
+}
+
+// E241: очистка UI от старых результатов транскрипции.
+// Backend делает DELETE utterance + DELETE decision в router (E153),
+// но это занимает время. Показываем UI как чистый — пользователь сразу видит
+// что "новый прогон" начался.
+function clearTranscriptionUI(protocol) {
+    // 1. Очистить транскрипт
+    const transcriptPanel = document.getElementById('panel-transcript');
+    if (transcriptPanel) {
+        const list = transcriptPanel.querySelector('.transcript-list');
+        if (list) list.innerHTML = '';
+        const counter = transcriptPanel.querySelector('.transcript-toolbar .text-muted');
+        if (counter) counter.textContent = '0 реплик';
+    }
+
+    // 2. Очистить in-memory данные (чтобы polling не показывал старые)
+    if (typeof window._currentUtterances !== 'undefined') {
+        window._currentUtterances = [];
+    }
+
+    // 3. Перерисовать вкладки (Решения / Важное) — теперь они пустые
+    renderImportantTab(protocol.ownerDocument || document, protocol, []);
+    renderDecisionsTab(protocol.ownerDocument || document, protocol);
+
+    // 4. Сбросить badge "Важное" и "Решения"
+    const impBadge = document.getElementById('important-badge');
+    if (impBadge) impBadge.textContent = '';
+    const decBadge = document.getElementById('decisions-badge');
+    if (decBadge) decBadge.textContent = '';
+
+    // 5. Удалить прогресс-бар (transcribe-progress) — updateProgressBar пересоздаст
+    const progress = document.getElementById('transcribe-progress');
+    if (progress) progress.remove();
+
+    console.log('[startTranscribe] UI cleared');
+}
+
 function startProgressPolling(protocol, taskId) {
     // Clear existing interval (E134: предотвращаем двойной polling)
     if (transcriptionPollInterval) {
@@ -1666,9 +2476,13 @@ function startProgressPolling(protocol, taskId) {
 
     // E136: активируем вкладку транскрипта и убираем hidden
     const transcriptTab = document.querySelector('[aria-controls="panel-transcript"]');
-    const transcriptPanel = document.getElementById('panel-transcript');
+    // E212: используем одну переменную panel — ниже она нужна
+    // для доступа к #btn-pause-transcription / #btn-resume-transcription.
+    // Раньше было transcriptPanel, а дальше по коду использовался `panel`
+    // (NameError → падение каждого тика polling → clearInterval не вызывался).
+    const panel = document.getElementById('panel-transcript');
     if (transcriptTab) transcriptTab.click();
-    if (transcriptPanel) transcriptPanel.removeAttribute('hidden');
+    if (panel) panel.removeAttribute('hidden');
 
     // Poll every 2 seconds
     transcriptionPollInterval = setInterval(async () => {
@@ -1678,29 +2492,37 @@ function startProgressPolling(protocol, taskId) {
             // Update UI with progress
             updateProgressBar(progress);
 
-            // E133: подтягиваем только НОВЫЕ реплики через after_sec
+            // E186: подтягиваем реплики — корректная логика после_sec
+            // Используем progress.segments_count (общее число реплик в БД)
             const segCount = progress.segments_count || 0;
-            if (segCount > _lastUtteranceCount) {
+            if (segCount > _lastUtteranceCount || _lastUtteranceCount === 0) {
                 try {
-                    // E133: after_sec — запрос вернёт только новые
-                    // E134: limit=500 (вместо 1000, чтобы не получать 422)
+                    // Запрашиваем все реплики ПОСЛЕ _lastRenderedSec
+                    // Если _lastUtteranceCount == 0 (первый запрос) — берём все
+                    const afterSec = _lastUtteranceCount === 0
+                        ? 0
+                        : _lastRenderedSec;
                     const newOnes = await api.listUtterances(protocol.id, {
                         limit: 500,
-                        after_sec: _lastRenderedSec,
+                        after_sec: afterSec,
                     });
                     const items = Array.isArray(newOnes)
                         ? newOnes
                         : (newOnes && newOnes.items) || [];
                     if (items.length > 0) {
                         await appendUtteranceItems(protocol.id, items);
-                        // Обновляем lastRenderedSec до максимального
+                        // E186: всегда обновляем maxSec из реальных данных
                         const maxSec = Math.max(
                             ...items.map(u => parseFloat(u.start_sec || 0))
                         );
                         if (maxSec > _lastRenderedSec) {
                             _lastRenderedSec = maxSec;
                         }
-                        _lastUtteranceCount = Math.max(_lastUtteranceCount, items.length);
+                    }
+                    // E186: обновляем счётчик ВСЕГДА — даже если items.length=0,
+                    // но прогресс показывает больше реплик (например, после финального flush)
+                    if (segCount > _lastUtteranceCount) {
+                        _lastUtteranceCount = segCount;
                     }
                 } catch (e) {
                     console.warn('Failed to fetch utterances:', e);
@@ -1808,6 +2630,11 @@ async function appendUtteranceItems(protocolId, items) {
         list.insertAdjacentHTML('beforeend', html);
     }
 
+    // E239: wireDecisionButtons и wireGrammarAndEditButtons — локальные
+    // для renderTranscriptTab, из глобальной appendUtteranceItems недоступны.
+    // Убрано — иначе ReferenceError каждый раз.
+    wireImportantButtons();
+
     // Обновляем счётчик в toolbar (E137: общее число реплик в DOM)
     const counter = panel.querySelector('.transcript-toolbar .text-muted');
     if (counter) {
@@ -1823,10 +2650,21 @@ async function appendUtteranceItems(protocolId, items) {
 
 
 function updateProgressBar(progress) {
-    // E113: Show human-readable message + percent
+    // E163: при failed показываем ошибку в прогресс-баре
     let bar = document.getElementById('transcribe-progress');
-    const pct = progress.progress_percent !== undefined ? progress.progress_percent : (progress.progress || 0);
-    const msg = progress.message || (pct < 5 ? 'Инициализация...' : pct < 95 ? 'Обработка аудио...' : 'Финализация...');
+    // E240: let вместо const — ниже pct переприсваивается в failed-ветке
+    let pct = progress.progress_percent !== undefined && progress.progress_percent !== null
+        ? progress.progress_percent
+        : (progress.progress || 0);
+    let msg;
+    let barClass = 'progress-bar-fill';
+    if (progress.status === 'failed') {
+        msg = `❌ Ошибка: ${progress.message || 'неизвестная'}`;
+        barClass = 'progress-bar-fill progress-failed';
+        pct = pct || 100;  // заполняем красным чтобы видно
+    } else {
+        msg = progress.message || (pct < 5 ? 'Инициализация...' : pct < 95 ? 'Обработка аудио...' : 'Финализация...');
+    }
     if (!bar) {
         bar = document.createElement('div');
         bar.id = 'transcribe-progress';
@@ -1837,14 +2675,21 @@ function updateProgressBar(progress) {
                 <span class="progress-percent">${pct}%</span>
             </div>
             <div class="progress-bar-bg">
-                <div class="progress-bar-fill" style="width: ${pct}%"></div>
+                <div class="${barClass}" style="width: ${pct}%"></div>
             </div>
         `;
         document.body.appendChild(bar);
+    } else {
+        // E248: снимаем display:none если был скрыт (clearTranscriptionUI)
+        bar.style.display = '';
+        bar.querySelector('.progress-status').textContent = msg;
+        bar.querySelector('.progress-percent').textContent = `${pct}%`;
+        const fill = bar.querySelector('.progress-bar-fill');
+        if (fill) {
+            fill.className = barClass;
+            fill.style.width = `${pct}%`;
+        }
     }
-    bar.querySelector('.progress-status').textContent = msg;
-    bar.querySelector('.progress-percent').textContent = `${pct}%`;
-    bar.querySelector('.progress-bar-fill').style.width = `${pct}%`;
 }
 
 function hideProgressBar() {
@@ -2068,4 +2913,84 @@ async function confirmDeleteProtocol(protocol) {
     } catch (err) {
         toast.error('Ошибка удаления: ' + err.message);
     }
+}
+
+
+
+// E182: Простой нативный плеер (50 строк вместо 400+).
+// Браузер сам управляет play/pause/seek/volume/speed через controls.
+// Нам нужен только API seekTo() для перехода по таймкоду реплики.
+async function initMediaPlayer(rootEl, protocol) {
+    if (!protocol || !protocol.audio_file) return;
+
+    const container = rootEl.querySelector('#media-player-container');
+    const video = container && container.querySelector('#media-video');
+    if (!video) return;
+
+    const filename = (container.dataset.filename || '').toLowerCase();
+    const ext = (filename.match(/\.([a-z0-9]+)$/i) || [])[1] || 'mp4';
+
+    const BACKEND_ORIGIN = window.__BACKEND_URL__
+        || window.API_BASE_URL
+        || 'http://127.0.0.1:8000';
+
+    const mediaUrl = (protocol.audio_file.source === 'url' && protocol.audio_file.source_url)
+        ? protocol.audio_file.source_url
+        : `${BACKEND_ORIGIN}/api/v1/hmp/media/protocols/${protocol.id}/source.${ext}`;
+
+    video.src = mediaUrl;
+
+    // E188: ждём loadedmetadata (когда video.duration станет известен)
+    // и вешаем обработчики на .timestamp для перехода по таймкоду.
+    function wireTimestampClicks() {
+        if (!rootEl) return;
+        rootEl.querySelectorAll('.timestamp').forEach(ts => {
+            ts.style.cursor = 'pointer';
+            ts.title = 'Перемотать на ' + ts.textContent;
+            // E188: клонируем чтобы убрать старые обработчики
+            const clone = ts.cloneNode(true);
+            ts.replaceWith(clone);
+            clone.addEventListener('click', () => {
+                const sec = parseFloat(clone.dataset.time);
+                if (isNaN(sec)) return;
+                if (!video.duration || isNaN(video.duration)) {
+                    toast.warning('Медиа ещё не загружено');
+                    return;
+                }
+                video.currentTime = Math.max(0, Math.min(sec, video.duration - 0.1));
+                video.play().catch(() => {});
+                toast.success(`▶ Перемотано на ${formatTimestamp(sec)}`);
+            });
+        });
+    }
+
+    // E188: привязываем когда duration станет известен
+    if (video.readyState >= 1) {
+        wireTimestampClicks();
+    } else {
+        video.addEventListener('loadedmetadata', wireTimestampClicks, { once: true });
+    }
+
+    // E182: API для перехода по таймкоду реплики
+    window.audioPlayer = {
+        seekTo: (sec) => {
+            if (!video.duration || isNaN(video.duration)) {
+                toast.warning('Медиа ещё не загружено');
+                return false;
+            }
+            video.currentTime = Math.max(0, Math.min(sec, video.duration - 0.1));
+            video.play().catch(() => {});
+            return true;
+        },
+        get currentTime() { return video.currentTime; },
+        get duration() { return video.duration; },
+        get paused() { return video.paused; },
+    };
+
+    // E182: Event для совместимости со старым кодом
+    window.addEventListener('audio-seek', (e) => {
+        if (e.detail && typeof e.detail.sec === 'number') {
+            window.audioPlayer.seekTo(e.detail.sec);
+        }
+    });
 }

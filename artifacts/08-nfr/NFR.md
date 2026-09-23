@@ -755,3 +755,39 @@ NFR-UX-2 (E144): Speaker badges всегда видимы
 - DELETE FROM utterance WHERE protocol_id = X
 - DELETE FROM decision WHERE protocol_id = X
 - Не должно остаться дублей после повторной транскрибации
+
+## NFR-BOOKMARK-1 (E172): Закладки сохраняются
+
+- `Utterance.important` сохраняется в БД
+- PATCH /utterances/{id}/important → переключение за < 200ms
+- При reload протокола — все закладки восстанавливаются
+
+## NFR для Remote Whisper (US-089)
+
+### NFR-PERF-006: Скорость загрузки файла
+
+- **Применимо к:** отправка аудио на remote Whisper
+- **Требование:** минимум 2 МБ/с
+- **Измерено:** `xhr.upload.progress` показывает реальную скорость
+- **Fallback:** при <500 КБ/с в течение 30 сек — toast.error
+
+### NFR-REL-007: Обработка ошибок remote
+
+- **Требование:** Graceful failure при недоступности remote
+- **Behavior:**
+  - Network error → показать toast.error, оставить локальный выбор
+  - CORS error → "Проверьте настройки CORS на удалённом сервере"
+  - 5xx → "Сервер вернул ошибку. Попробуйте позже"
+
+### NFR-REL-008: CORS на remote сервере
+
+- **Требование:** `Access-Control-Allow-Origin: *`
+- **Headers:** `Access-Control-Allow-Methods: *`, `Access-Control-Allow-Headers: *`
+- **Реализация:** FastAPI `CORSMiddleware(allow_origins=["*"])`
+
+### NFR-OPS-009: Деплой remote сервера
+
+- **Требование:** < 5 минут на чистую Ubuntu 22.04+
+- **Шаги:** см. `whisper-server/deploy-whisper-only.sh`
+- **Systemd:** `whisper-server.service` (auto-restart, logging)
+- **Firewall:** `ufw allow 8000/tcp`

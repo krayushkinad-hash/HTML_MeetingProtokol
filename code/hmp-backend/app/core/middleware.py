@@ -3,6 +3,7 @@
 NFR: §5.4 (RFC 7807), §5.9 (X-Correlation-Id).
 """
 import uuid
+from datetime import datetime, timezone  # E192: для ISO timestamp
 from typing import Awaitable, Callable
 
 from fastapi import Request, Response
@@ -63,6 +64,6 @@ class ProblemDetailsMiddleware(BaseHTTPMiddleware):
                     "code": "INTERNAL_ERROR",
                     "message": "Внутренняя ошибка сервера",
                     "correlation_id": correlation_id,
-                    "timestamp": "PLACEHOLDER",  # TODO: real timestamp
+                    "timestamp": datetime.now(timezone.utc).isoformat(),  # E192: real ISO timestamp
                 },
             )

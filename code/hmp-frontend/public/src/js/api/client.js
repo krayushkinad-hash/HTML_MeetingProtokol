@@ -124,7 +124,7 @@ export const api = {
 
     // === Screenshots ===
     listScreenshots: (protocolId) =>
-        request('GET', `/screenshots?protocol_id=${protocolId}`),
+        request('GET', `/protocols/${protocolId}/screenshots`),
     createScreenshot: (data) => request('POST', '/screenshots', { body: data }),
     uploadScreenshot: (file, protocolId, options = {}) => {
         const fd = new FormData();
@@ -163,9 +163,7 @@ export const api = {
     getTranscriptionProgressByProtocol: (protocolId) =>
         request('GET', `/transcribe/progress-by-protocol/${protocolId}`),
 
-    // === Diarization ===
-    startDiarization: (protocolId) =>
-        request('POST', '/diarize/run', { body: { protocol_id: protocolId } }),
+    // E216: дубликат startDiarization убран — ниже единственное объявление в секции Summary/AI
     getDiarizationResult: (protocolId) =>
         request('GET', `/diarize/result/${protocolId}`),
 
@@ -175,14 +173,18 @@ export const api = {
         const qs = new URLSearchParams(allParams).toString();
         return request('GET', `/utterances?${qs}`);
     },
-    updateUtteranceText: (id, text) =>
-        request('PATCH', `/utterances/${id}/text`, { body: { text } }),
+    // E189: обновлён — теперь принимает (id, data) целиком.
+    // Передаёт data как есть (text + version_snapshot).
+    updateUtteranceText: (id, data) =>
+        request('PATCH', `/utterances/${id}/text`, { body: data }),
     updateUtteranceSpeaker: (id, speakerId) =>
         request('PATCH', `/utterances/${id}/speaker`, { body: { speaker_id: speakerId } }),
 
     // === Speakers ===
     listSpeakers: (protocolId) => request('GET', `/speakers?protocol_id=${protocolId}`),
     updateSpeaker: (id, data) => request('PATCH', `/speakers/${id}`, { body: data }),
+    // E217: добавлено — edit-speakers.js раньше вызывал fetch напрямую
+    deleteSpeaker: (id) => request('DELETE', `/speakers/${id}`),
     mergeSpeakers: (sourceId, targetId, newDisplayName) =>
         request('POST', '/speakers/merge', {
             body: { source_id: sourceId, target_id: targetId, new_display_name: newDisplayName },
@@ -266,6 +268,10 @@ export const api = {
     resumeTranscription: (taskId) => request('POST', `/transcribe/resume/${taskId}`),
     // E154: Grammar/spelling check
     checkGrammar: (data) => request('POST', '/ai/check-grammar', { body: data }),
-    updateUtteranceText: (id, data) => request('PUT', `/utterances/${id}/text`, { body: data }),
-};    // E162: Upgrade low-confidence segments
+    // E162: Upgrade low-confidence segments
     upgradeWeakSegments: (protocolId, data = {}) => request('POST', `/transcribe/upgrade/${protocolId}`, { body: data }),
+    // E172: Toggle "important" bookmark
+    toggleUtteranceImportant: (id, important) => request('PATCH', `/utterances/${id}/important`, { body: { important } }),
+
+
+};

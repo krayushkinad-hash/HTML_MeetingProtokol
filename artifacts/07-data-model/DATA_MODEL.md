@@ -83,6 +83,9 @@ erDiagram
 | `llm_provider` | ENUM(llm_provider) | NO | `'hermes'` | Основной LLM |
 | `llm_model` | VARCHAR(100) | YES | | Модель LLM |
 | `whisper_model` | ENUM(whisper_model) | NO | `'large-v3'` | Размер Whisper |
+| `whisper_remote_enabled` | BOOLEAN | NO | `false` | E254: использовать remote Whisper |
+| `whisper_remote_url` | VARCHAR(255) | YES | NULL | E254: URL удалённого сервера |
+| `whisper_remote_path` | VARCHAR(100) | YES | `/transcribe` | E254: endpoint путь |
 | `whisper_prompt` | TEXT | YES | | Промпт для Whisper |
 | `theme` | ENUM(theme) | NO | `'auto'` | Тема UI |
 | `hotkey_show_search` | VARCHAR(50) | NO | `'Ctrl+K'` | Hotkey для поиска |
@@ -449,6 +452,7 @@ LIMIT 1;
 | ➕ Колонка `protocol.folder_id` | US-053, 060 |
 | ➕ Колонка `audio_file.file_path` | US-063 |
 | ➕ Колонки `user_setting` расширены (11 полей) | US-054..066 |
+| E254 | 2026-09-23 | ➕ Колонки `user_setting.remote_*` (3 поля) | US-089 |
 | 🔧 Уточнены FK-отношения | US-059, 060 |
 
 ## 8. Связь с другими артефактами
@@ -549,3 +553,33 @@ class TranscriptionTask(Base):
 - `last_processed_sec` обновляется каждые 2 сек в `persist_progress_loop`
 - `segments_so_far_json` — все utterance этого протокола (для возможности re-process)
 - `audio_hash` — для E151 (проверка при resume что файл тот же)
+
+## Utterance.important (E172, US-087)
+
+```python
+class Utterance(Base):
+    id: UUID
+    text: str                    # оригинал
+    important: bool = False      # E172: закладка "Важное"
+    decision_ids: list[UUID] = []
+    action_item_id: UUID | None
+```
+
+Поле `important` уже было в БД (E001). Использовалось для UI только сейчас (US-087).
+
+## AudioFile.extension (E173)
+
+```python
+class AudioFile(Base):
+    filename: str          # "recording.webm"
+    extension: str         # "webm" (из Path(filename).suffix.lstrip("."))
+    mime_type: str         # "audio/webm" или "video/webm"
+```
+
+**Поддерживаемые значения extension** (от ALLOWED_EXTENSIONS):
+```
+Аудио: mp3, wav, m4a, ogg, flac, opus, webm, aac, mka
+Видео: mp4, mkv, webm, mov, avi, 3gp, ogv
+```
+
+`faster-whisper` через ffmpeg читает все эти форматы. Никакой backend-валидации.

@@ -179,9 +179,9 @@ async def update_folder(
     if body.sort_order is not None:
         folder.sort_order = body.sort_order
 
-    folder.updated_at = func.now() if False else folder.updated_at  # SQLAlchemy handles
-    from datetime import datetime
-    folder.updated_at = datetime.now()
+    # E208: timezone-aware datetime (PostgreSQL TIMESTAMP WITH TIME ZONE требует UTC)
+    from datetime import datetime, timezone
+    folder.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(folder)
@@ -261,8 +261,9 @@ async def add_protocol_to_folder(
         )
 
     protocol.folder_id = folder_id
-    from datetime import datetime
-    protocol.updated_at = datetime.now()
+    # E208: timezone-aware datetime
+    from datetime import datetime, timezone
+    protocol.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
     logger.info("protocol_added_to_folder",
@@ -299,8 +300,9 @@ async def remove_protocol_from_folder(
         )
 
     protocol.folder_id = None
-    from datetime import datetime
-    protocol.updated_at = datetime.now()
+    # E208: timezone-aware datetime
+    from datetime import datetime, timezone
+    protocol.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
     return {"status": "ok", "protocol_id": str(protocol_id)}
@@ -337,8 +339,9 @@ async def move_protocol_to_folder(
             )
 
     protocol.folder_id = body.folder_id
-    from datetime import datetime
-    protocol.updated_at = datetime.now()
+    # E208: timezone-aware datetime
+    from datetime import datetime, timezone
+    protocol.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
     return {"status": "ok", "protocol_id": str(protocol_id), "folder_id": str(body.folder_id)}
@@ -371,7 +374,8 @@ async def batch_move_protocols(
         protocol = await db.get(Protocol, pid)
         if protocol:
             protocol.folder_id = body.folder_id
-            protocol.updated_at = datetime.now()
+            # E208: timezone-aware datetime
+            protocol.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
 

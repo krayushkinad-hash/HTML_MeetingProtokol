@@ -429,3 +429,77 @@ flowchart TD
   - P-03 → US-011, 012, 013, 014, 026, 027, 028 (Astra Linux, офлайн)
   - P-04 → US-015, 016, 017 (DOCX-экспорт)
 - **Связь с Vision:** §7 Scope (все процессы описаны), §8 Risks (митигации), §9 Ограничения (контроль ресурсов)
+
+## Поддерживаемые форматы (E173)
+
+```
+Пользователь выбирает файл
+    ↓
+Проверка расширения (frontend ALLOWED_EXTENSIONS):
+  ✅ Аудио: mp3, wav, m4a, ogg, flac, opus, webm, aac, mka
+  ✅ Видео: mp4, mkv, webm, mov, avi, 3gp, ogv
+    ↓
+POST /protocols с file → streaming save
+    ↓
+Backend НЕ валидирует MIME (доверяет faster-whisper)
+    ↓
+Whisper.transcribe(audio_path) → ffmpeg decode → распознавание
+```
+
+## Process: Транскрибация через Remote Whisper (US-089)
+
+**Триггер:** Пользователь нажимает "Транскрибировать" на странице протокола
+
+**Шаги:**
+
+1. Frontend читает `user_setting.whisper_remote_enabled`
+2. **Decision (switch/if):**
+   - **IF `enabled=true` AND `url` валидный** → Remote flow (шаг 3)
+   - **ELSE** → Local flow (шаг 8)
+
+3. **Remote flow:**
+   - Frontend скачивает аудио с локального backend: `GET /media/protocols/{id}/source.{ext}`
+   - Frontend формирует FormData: {file, model, language, beam_size}
+   - Frontend POST `{remote_url}{remote_path}` через XHR с прогрессом загрузки
+   - Remote сервер: faster-whisper → JSON `{text, language, duration_sec, segments[]}`
+   - Frontend: показывает прогресс-бар 0% → 100%
+4. **Save result locally:**
+   - Для каждого segment в ответе: `POST /api/v1/hmp/utterances` (или PATCH) 
+   - Frontend обновляет `window._currentUtterances` и перерисовывает transcript
+5. **Done:** toast.success "Удалённый Whisper вернул N реплик"
+
+6. **Failure handling:**
+   - Network error → toast.error + UI обновляется
+   - Поля «Источник» сбрасывать не нужно — пользователь сам решит
+7. Пользователь в любой момент может переключиться на "Локальный"
+
+8. **Local flow (default):**
+   - Frontend: `POST /api/v1/hmp/transcribe/run` с `model=large-v3`
+   - Backend: запускает faster-whisper + сохраняет utterances в БД
+   - Polling `GET /transcribe/progress/{task_id}` каждые 2 сек
+   - Utterances появляются по мере обработки (streaming)
+
+**Mermaid диаграмма:**
+
+```mermaid
+flowchart TD
+    Start([User clicks Transcribe]) --> Read[Read user_setting.whisper_remote_enabled]
+    Read --> Switch{remote AND url}
+    
+    Switch -->|YES| Download[Download audio from local backend]
+    Download --> Upload[POST to remote Whisper /transcribe]
+    Upload --> RemoteProcess[Remote Whisper transcribes]
+    RemoteProcess --> SaveLoop[For each segment: POST /utterances]
+    SaveLoop --> Reload[Reload transcript from backend]
+    Reload --> Success([Done: toast.success])
+    
+    Switch -->|NO| LocalStart[POST /api/v1/hmp/transcribe/run]
+    LocalStart --> LocalWorker[Backend: faster-whisper]
+    LocalWorker --> LocalPoll[Polling /transcribe/progress]
+    LocalPoll --> LocalDone([Utterances appear])
+    
+    Upload -.Network error.-> Error([toast.error])
+    Upload -.CORS error.-> Error
+```
+
+**Acceptance:** см. US-089.md

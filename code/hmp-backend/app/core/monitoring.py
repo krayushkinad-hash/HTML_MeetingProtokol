@@ -1,4 +1,15 @@
-"""RSS (memory) monitor for OOM protection (NFR §QG-7, ADR-010)."""
+"""RSS (memory) monitor — DEPRECATED (E193, E211).
+
+Не вызывается нигде. Оставлен для совместимости.
+
+Раньше использовался для auto-pause транскрибации при перерасходе RAM,
+но wait_if_paused() нигде не вызывался — монитор только спамил
+"rss_pause" / "rss_resume" в логах без реальной паузы.
+
+Сейчас:
+- rss_limit_mb = 8192 МБ в config.py — запаса хватает
+- Если нужен реальный auto-pause — вызвать wait_if_paused() из _run_transcribe_eager
+"""
 import asyncio
 
 import psutil

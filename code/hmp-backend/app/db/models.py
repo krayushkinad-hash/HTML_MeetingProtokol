@@ -93,6 +93,10 @@ class UserSetting(Base):
     timezone: Mapped[str] = mapped_column(String(50), server_default="Europe/Moscow")
     default_language: Mapped[str] = mapped_column(String(20), server_default="ru")
     use_gpu: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    # E254: remote Whisper settings (US-089)
+    whisper_remote_enabled: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    whisper_remote_url: Mapped[str | None] = mapped_column(String(255))
+    whisper_remote_path: Mapped[str | None] = mapped_column(String(100), server_default="/transcribe")
     default_provider: Mapped[str | None] = mapped_column(String(50))
     fallback_provider: Mapped[str | None] = mapped_column(String(50))
     api_keys: Mapped[str | None] = mapped_column(Text)
@@ -302,6 +306,13 @@ class TranscriptionTask(Base):
     __table_args__ = (
         Index("idx_task_protocol", "protocol_id"),
         Index("idx_task_status", "status"),
+        # E195: защита от опечаток в status. Вместо расширения ENUM
+        # (что требует миграции) используем CheckConstraint на уровне БД.
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'running', 'starting', "
+            "'paused', 'completed', 'failed', 'cancelled')",
+            name="chk_task_status",
+        ),
     )
 
 

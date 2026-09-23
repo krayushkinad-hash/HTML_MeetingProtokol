@@ -58,13 +58,35 @@ def check_extra_close_paren_at_eof(text):
                   <-- lost the function-level close
     }              <-- closes renderSettingsView - mismatched
 
-    Heuristic:
-        Pattern `});\\n}` followed by another function declaration
-        AND balanced parens in context = suspicious
+    E223: heuristic с проверкой ГЛУБИНЫ фигурных скобок.
+    Валидный `});\\n}` идёт при depth >= 1 (внутри функции).
+    Подозрительный — при depth == 0 (глобальный уровень).
     """
     issues = []
     # Match `});` followed by newline and `}`
     pattern = re.compile(r"\}\);\s*\n\s*\}", re.MULTILINE)
+
+    def _brace_depth_before(text, pos):
+        """E223: считает глубину { в text[:pos] (без учёта строк/комментов)."""
+        depth = 0
+        in_str = None  # None | '"' | "'" | '`'
+        i = 0
+        while i < pos:
+            ch = text[i]
+            if in_str:
+                if ch == '\\' and i + 1 < pos:
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+            elif ch in ('"', "'", '`'):
+                in_str = ch
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            i += 1
+        return depth
 
     for match in pattern.finditer(text):
         line_no = text[:match.start()].count("\n") + 1
@@ -83,6 +105,12 @@ def check_extra_close_paren_at_eof(text):
                 "export class",
             )
         ):
+            continue
+
+        # E223: только для глобального уровня (depth == 0 перед `});`)
+        depth_before = _brace_depth_before(text, match.start())
+        if depth_before >= 1:
+            # Внутри функции — это валидный код, не подозрительный
             continue
 
         # Strip strings/comments in context (500 chars before)

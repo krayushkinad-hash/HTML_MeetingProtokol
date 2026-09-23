@@ -34,10 +34,8 @@
     margin-bottom: 24px;
 }
 
-video-player {
-    display: block;
-    width: 100%;
-}
+/* E180: video-player стили удалены — компонент больше не используется.
+   Используется только initMediaPlayer() с нативным <video>/<audio>. */
 
 /* === Tabs === */
 tab-bar {
@@ -470,4 +468,318 @@ tab-bar {
     .protocol-meta {
         font-size: 12px;
     }
+}
+
+/* E163: Прогресс-бар при ошибке */
+.progress-failed {
+    background: var(--danger) !important;
+    animation: progress-failed-pulse 1.5s ease-in-out infinite;
+}
+@keyframes progress-failed-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+.transcribe-progress .progress-status {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 70%;
+}
+
+/* E170: Медиа-плеер */
+.media-player-wrapper {
+    margin-top: 12px;
+    margin-bottom: 16px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.media-player-wrapper video {
+    display: block;
+    width: 100%;
+    max-height: 360px;
+    background: #000;
+    border-radius: 6px;
+}
+.media-player-wrapper audio {
+    width: 100%;
+    margin-top: 4px;
+}
+.media-player-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    flex-wrap: wrap;
+}
+.media-player-controls .btn,
+.media-player-controls .btn-tiny {
+    padding: 6px 10px;
+}
+.media-player-controls input[type="range"] {
+    flex: 1;
+    min-width: 120px;
+    height: 4px;
+    -webkit-appearance: none;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+}
+.media-player-controls input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+}
+.media-player-controls input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+}
+.utterance-meta .timestamp {
+    cursor: pointer;
+    color: var(--accent);
+    font-family: monospace;
+    padding: 0 4px;
+    border-radius: 3px;
+    transition: background 0.15s;
+}
+.utterance-meta .timestamp:hover {
+    background: var(--bg-tertiary);
+    text-decoration: underline;
+}
+
+/* E172: Закладка "Важное" */
+.utterance-item.is-important {
+    border-left: 3px solid #fbbf24;
+    background: rgba(251, 191, 36, 0.04);
+}
+.btn-mark-important {
+    color: var(--text-muted);
+    border-color: var(--border);
+}
+.btn-mark-important:hover {
+    color: #fbbf24;
+    border-color: #fbbf24;
+}
+.btn-important-marked {
+    color: #fbbf24;
+    border-color: #fbbf24;
+    background: rgba(251, 191, 36, 0.08);
+}
+.important-mark {
+    color: #fbbf24;
+    font-weight: bold;
+    margin-left: 6px;
+}
+
+/* E231: иконка низкой уверенности */
+.low-conf-mark {
+    margin-left: 4px;
+    font-weight: bold;
+}
+
+/* E232: badge в табе "Важное" */
+.tab-badge {
+    margin-left: 4px;
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+/* E242: inline-edit для атрибутов протокола */
+.editable-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.editable-meta .btn-edit-meta {
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.editable-meta:hover .btn-edit-meta {
+    opacity: 1;
+}
+h1.editable-meta {
+    display: inline-flex !important;
+    align-items: baseline;
+    gap: 8px;
+}
+
+/* E242: модальное окно для редактирования атрибутов протокола */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(2px);
+}
+.modal-dialog {
+    background: var(--bg-primary, #fff);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    max-width: 560px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: modal-fade-in 0.18s ease-out;
+}
+@keyframes modal-fade-in {
+    from { opacity: 0; transform: translateY(-12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border, #d4d8de);
+}
+.modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+.modal-close {
+    background: transparent;
+    border: none;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text-secondary, #5a6470);
+    padding: 0 6px;
+}
+.modal-close:hover {
+    color: var(--text-primary, #1a1a1a);
+}
+.modal-body {
+    padding: 20px;
+}
+.modal-body .form-group {
+    margin-bottom: 14px;
+}
+.modal-body label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    color: var(--text-secondary, #5a6470);
+}
+.modal-body input,
+.modal-body textarea,
+.modal-body select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: inherit;
+    box-sizing: border-box;
+    background: var(--bg-primary, #fff);
+    color: var(--text-primary, #1a1a1a);
+}
+.modal-body input:focus,
+.modal-body textarea:focus,
+.modal-body select:focus {
+    outline: none;
+    border-color: var(--accent, #3b82f6);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+.form-error {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border, #d4d8de);
+}
+.modal-actions .btn {
+    padding: 8px 16px;
+}
+.btn-edit-protocol {
+    margin-left: 12px;
+    padding: 4px 10px;
+    font-size: 13px;
+    background: transparent;
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 6px;
+    color: var(--text-secondary, #5a6470);
+    cursor: pointer;
+}
+.btn-edit-protocol:hover {
+    background: var(--bg-secondary, #f5f6f8);
+    color: var(--text-primary, #1a1a1a);
+}
+
+/* E253: отдельный прогресс-бар для удалённого Whisper */
+.transcribe-progress-remote {
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    width: 380px;
+    background: var(--bg-primary, #fff);
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: 12px 16px;
+    z-index: 9999;
+    font-family: inherit;
+}
+.transcribe-progress-remote .remote-progress-header {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary, #1a1a1a);
+}
+.transcribe-progress-remote .remote-progress-header i {
+    margin-right: 6px;
+    color: var(--accent, #3b82f6);
+}
+.transcribe-progress-remote .remote-progress-pct {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent, #3b82f6);
+}
+.transcribe-progress-remote .remote-progress-track {
+    height: 6px;
+    background: var(--bg-secondary, #f0f2f5);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+.transcribe-progress-remote .remote-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #3b82f6, #60a5fa);
+    transition: width 0.3s ease;
+}
+.transcribe-progress-remote .remote-progress-msg {
+    font-size: 12px;
+    color: var(--text-secondary, #5a6470);
+    line-height: 1.4;
+    word-break: break-word;
 }

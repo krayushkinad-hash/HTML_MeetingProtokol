@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import os
+import sys  # E210: перенесён в самый верх, иначе NameError при первом print(file=sys.stderr)
 
 # E061: Aggressively disable SOCKS/HTTPS proxy BEFORE any imports
 # SOCKS proxy (socks4://) breaks huggingface_hub download
@@ -21,9 +22,25 @@ for _var in _proxy_vars:
     if _var in os.environ:
         del os.environ[_var]
 
+
+
+
+# E163: После импорта requests — очищаем proxy_manager_for cache
+# (requests кэширует SOCKSProxyManager, который падает без PySocks)
+try:
+    import requests.adapters as _req_adapters
+    # E164: после monkey-patch на SOCKS — очистить кэш
+    if hasattr(_req_adapters, 'HTTPAdapter'):
+        for _adapter in _req_adapters.HTTPAdapter.__subclasses__() or []:
+            if hasattr(_adapter, 'proxy_manager'):
+                _adapter.proxy_manager.clear()
+                print("[main.py] E163+E164: cleared requests proxy_manager cache", file=sys.stderr)
+except Exception as _req_err:
+    print(f"[main.py] E163: requests cache clear skipped: {_req_err}", file=sys.stderr)
+
+
 # E061b: Reset httpx cached client if it already exists
 # (huggingface_hub creates httpx.Client at import time)
-import sys
 print("[main.py] E061: proxy env vars cleared", file=sys.stderr)
 try:
     # If huggingface_hub was already imported, reset its cached client
@@ -43,7 +60,6 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging_config import configure_logging, get_logger
-from app.core.monitoring import RSSMonitor
 from app.core.middleware import CorrelationIdMiddleware, ProblemDetailsMiddleware
 from app.db.session import init_db, close_db
 from app.routers import (
@@ -85,10 +101,14 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await init_db()
 
-    # Start RSS monitor (NFR §QG-7)
-    rss_monitor = RSSMonitor(limit_mb=settings.rss_limit_mb)
-    await rss_monitor.start()
-    app.state.rss_monitor = rss_monitor
+    # E193: RSS monitor отключён — он не делал реальной паузы транскрибации
+    # (никто не вызывал wait_if_paused). Только спам в логах "rss_pause" / "rss_resume".
+    # Защита через rss_limit_mb=8192 (8 GB) + chunked transcription достаточна.
+    logger.info(
+        "rss_monitor_disabled",
+        note="RSSMonitor не реализует реальную паузу, отключён. "
+             "Лимит памяти 8 GB контролируется на уровне ОС / контейнера.",
+    )
 
     logger.info("ready", rss_limit_mb=settings.rss_limit_mb)
 
@@ -96,7 +116,6 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("shutdown")
-    await rss_monitor.stop()
     await close_db()
 
 
@@ -144,29 +163,9 @@ def create_app() -> FastAPI:
 
         response = await call_next(request)
 
-        # Convert 404 or 204 on GET requests to null/empty (so frontend doesn't break)
-        if response.status_code in (404, 204) and request.method == "GET":
-            from fastapi.responses import JSONResponse
-            path = request.url.path
-            list_endpoints = [
-                "/utterances", "/speakers", "/tags", "/decisions",
-                "/action-items", "/screenshots", "/dictionary",
-                "/protocols", "/bot/users", "/bot/sessions",
-                "/transcribe", "/diarize", "/calendar"
-            ]
-            is_list = (
-                any(path.endswith(ep) or path.endswith(ep + "/") for ep in list_endpoints)
-                or "search" in path
-                or "calendar" in path
-            )
-            return JSONResponse(
-                status_code=200,
-                content=[] if is_list else None,
-                headers={
-                    "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
-                    "Access-Control-Allow-Credentials": "true",
-                }
-            )
+        # E209: убрана конвертация 404→200. Это маскировало реальные ошибки —
+        # фронт получал null/[] для несуществующих протоколов и падал в другом месте.
+        # 404 теперь остаются 404, фронт умеет их обрабатывать.
 
         # Add CORS headers to every response
         origin = request.headers.get("origin", "*")
@@ -229,3 +228,13 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+
+# E166: раньше здесь был monkey-patch SOCKSProxyManager, который
+# вместо игнорирования SOCKS бросал RuntimeError. Это ломало
+# huggingface_hub при попытке скачать модель. Теперь прокси
+# вычищаются в transcription._load_model() до вызова requests.
+try:
+    import PySocks  # noqa: F401
+    print("[main.py] E166: PySocks available", file=sys.stderr)
+except ImportError:
+    print("[main.py] E166: PySocks not installed (SOCKS will be ignored in _load_model)", file=sys.stderr)

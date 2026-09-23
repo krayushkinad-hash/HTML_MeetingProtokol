@@ -54,84 +54,39 @@ def get_lines_in_function(text: str, symbol_name: str) -> list[int]:
     return usages
 
 
-def check_file(file_path: Path) -> list:
-    """Return list of (file_name, line_no, issue) tuples."""
+def _check_identifier(file_path, text, imports, exports, name):
+    """E224: общая проверка идентификатора — используется но не импортирован/не экспортирован."""
+    if name in exports:
+        return []
+    usages = []
+    for m in re.finditer(rf"\b{name}\b", text):
+        ln = text[:m.start()].count("\n") + 1
+        line_text = text.split("\n")[ln - 1]
+        if (
+            not line_text.strip().startswith("import ")
+            and not line_text.strip().startswith("//")
+            and f"const {name}" not in line_text
+            and f"function {name}" not in line_text
+            and f"let {name}" not in line_text
+        ):
+            usages.append(ln)
+    if usages and name not in imports:
+        return [(file_path.name, str(usages[0]), f"uses {name} but not imported")]
+    return []
+
+
+def check_file(file_path):
+    """Check that all globals used are imported or defined."""
     text = file_path.read_text(encoding="utf-8")
     issues = []
 
     imports = get_imports(text)
     exports = get_exports(text)
 
-    # Check toast - skip if exported (it's exported by views/settings.js)
-    if "toast" not in exports:
-        usages = get_lines_in_function(text, "toast")
-        # Get only `toast.X` usage lines
-        toast_calls = []
-        for m in re.finditer(r"\btoast\.\w+", text):
-            ln = text[:m.start()].count("\n") + 1
-            line_text = text.split("\n")[ln - 1]
-            if not line_text.strip().startswith("import "):
-                toast_calls.append(ln)
-
-        if toast_calls and "toast" not in imports:
-            issues.append(
-                (file_path.name, str(toast_calls[0]), "uses toast but not imported")
-            )
-
-    # Check api - it MUST be imported for module usage
-    api_calls = []
-    for m in re.finditer(r"\bapi\.\w+\(", text):
-        ln = text[:m.start()].count("\n") + 1
-        line_text = text.split("\n")[ln - 1]
-        if not line_text.strip().startswith("import "):
-            api_calls.append(ln)
-
-    if api_calls and "api" not in imports:
-        issues.append(
-            (file_path.name, str(api_calls[0]), "uses api but not imported")
-        )
-
-    # Check ICONS
-    if "ICONS" not in exports:
-        icons_calls = []
-        for m in re.finditer(r"\bICONS\b", text):
-            ln = text[:m.start()].count("\n") + 1
-            line_text = text.split("\n")[ln - 1]
-            if (
-                not line_text.strip().startswith("import ")
-                and "ICONS[" not in line_text  # usages like ICONS['home']
-            ):
-                # Only check declarations
-                if "= ICONS" in line_text or "ICONS." in line_text:
-                    icons_calls.append(ln)
-
-        if icons_calls and "ICONS" not in imports:
-            issues.append(
-                (
-                    file_path.name,
-                    str(icons_calls[0]),
-                    "uses ICONS but not imported",
-                )
-            )
-
-    # SETTINGS_CSS - only check imported if used
-    if "SETTINGS_CSS" not in exports:
-        # Find places where SETTINGS_CSS is used (not defined)
-        scss_usages = []
-        for m in re.finditer(r"\bSETTINGS_CSS\b", text):
-            ln = text[:m.start()].count("\n") + 1
-            line_text = text.split("\n")[ln - 1]
-            if not line_text.strip().startswith("import ") and "const SETTINGS_CSS" not in line_text:
-                scss_usages.append(ln)
-
-        if scss_usages and "SETTINGS_CSS" not in imports:
-            issues.append(
-                (
-                    file_path.name,
-                    str(scss_usages[0]),
-                    "uses SETTINGS_CSS but not imported",
-                )
-            )
+    # E224: проверяем основные утилиты
+    # Список можно расширять (escapeHtml, formatTime, ...)
+    for util in ("toast", "api", "ICONS", "SETTINGS_CSS"):
+        issues.extend(_check_identifier(file_path, text, imports, exports, util))
 
     return issues
 

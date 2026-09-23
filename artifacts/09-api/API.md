@@ -1007,3 +1007,84 @@ POST /api/v1/hmp/transcribe/pause/{task_id}
 3. Логируем `transcription_reset_completed`
 
 Это **гарантирует** что повторная транскрибация не дублирует данные.
+
+## Endpoint: PATCH /api/v1/hmp/utterances/{id}/important (E172)
+
+### Request
+```json
+{ "important": true }
+```
+
+### Response (200)
+```json
+{
+  "id": "uuid",
+  "text": "...",
+  "important": true,
+  ...
+}
+```
+
+Toggle закладки "Важное" для реплики.
+
+## Поддерживаемые форматы файлов (E173)
+
+### Upload (`POST /protocols`)
+Любой формат из `ALLOWED_EXTENSIONS` (frontend):
+```
+Аудио: mp3, wav, m4a, ogg, flac, opus, webm, aac, mka
+Видео: mp4, mkv, webm, mov, avi, 3gp, ogv
+```
+
+`mime_type` определяется из `Content-Type` multipart; если пусто — из расширения.
+
+### URL (`POST /protocols/url`)
+MIME-to-extension mapping (backend):
+```
+audio/mpeg → mp3
+audio/mp4 → m4a
+audio/wav → wav
+audio/x-wav → wav
+audio/ogg → ogg
+audio/webm → webm    # E173
+video/mp4 → mp4
+video/webm → webm
+video/x-matroska → mkv
+```
+
+Если MIME неизвестен → fallback на `mp4` (по умолчанию).
+
+## US-088: Edit Protocol Attributes
+
+**Status**: ✅ Implemented (E242)
+
+`PATCH /api/v1/hmp/protocols/{id}` supports:
+- `title` — название протокола
+- `chair` — председатель совещания
+- `agenda` — повестка дня (multi-line)
+- `location` — место проведения
+- `language` — язык транскрипции (E148)
+- `translation_language` — язык перевода (E149)
+
+Frontend: inline-edit через `prompt()` по клику ✏️.
+
+## US-089: Remote Whisper Server
+
+### POST /api/v1/hmp/transcribe/run
+
+Если `whisper_remote_enabled=true` в `user-setting`,
+backend проксирует аудио на remote URL вместо локального Whisper.
+
+```json
+// Settings
+{
+  "whisper_remote_enabled": true,
+  "whisper_remote_url": "http://195.133.77.76:8000",
+  "whisper_remote_path": "/transcribe"
+}
+
+// Backend: POST {remote_url}{remote_path}
+// Body: multipart/form-data с полями file, model, language, beam_size
+// Response: { text, language, duration_sec, segments: [...] }
+// Затем backend разбивает текст на utterances и сохраняет в БД
+```

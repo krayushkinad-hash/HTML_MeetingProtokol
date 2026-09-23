@@ -51,7 +51,7 @@ class HermesClient(LLMClient):
                 f"{settings.hermes_base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {settings.hermes_api_key}"},
                 json={
-                    "model": settings.llm_model or "hermes-3",
+                    "model": getattr(settings, "llm_model", "hermes-3"),  # E200: getattr fallback
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
@@ -88,9 +88,11 @@ class GigaChatClient(LLMClient):
                 },
                 json={
                     "model": "GigaChat",
-                    "messages": [
-                        {"role": "system" if system else "user", "content": system or prompt},
-                        {"role": "user", "content": prompt if system else ""},
+                    # E201: формируем messages корректно.
+                    # Если system=None, не добавляем пустое сообщение.
+                    "messages": ([{"role": "system", "content": system}]
+                                if system else []) + [
+                        {"role": "user", "content": prompt},
                     ],
                     "max_tokens": max_tokens,
                     "temperature": temperature,
@@ -157,24 +159,27 @@ class LLMRouter:
         primary = provider or settings.llm_default_provider
         fallback = settings.llm_fallback_provider
 
+        # E200: убрана тавтология "prov == primary or prov != primary".
+        # Цикл и так пробует primary, потом fallback — лишнее условие.
         for prov in [primary, fallback]:
-            if prov == primary or prov != primary:  # Try fallback if primary fails
-                try:
-                    client = self.clients[prov]
-                    text, tokens = await client.generate(prompt, system, max_tokens, temperature)
-                    logger.info(
-                        "llm_generated",
-                        provider=prov,
-                        tokens=tokens,
-                        prompt_len=len(prompt),
-                    )
-                    return text, prov, tokens
-                except Exception as e:
-                    logger.warning(
-                        "llm_provider_failed",
-                        provider=prov,
-                        error=str(e),
-                    )
+            if not prov:
+                continue  # skip None
+            try:
+                client = self.clients[prov]
+                text, tokens = await client.generate(prompt, system, max_tokens, temperature)
+                logger.info(
+                    "llm_generated",
+                    provider=prov,
+                    tokens=tokens,
+                    prompt_len=len(prompt),
+                )
+                return text, prov, tokens
+            except Exception as e:
+                logger.warning(
+                    "llm_provider_failed",
+                    provider=prov,
+                    error=str(e),
+                )
 
         raise RuntimeError("All LLM providers failed")
 

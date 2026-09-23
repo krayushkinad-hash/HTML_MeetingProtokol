@@ -89,6 +89,11 @@ async def run_diarization(
             detail=f"Протокол {body.protocol_id} не найден",
         )
 
+    # E191-fix: эвристическая диаризация НЕ требует HF_TOKEN.
+    # diarization_service работает по паузам (PAUSE_THRESHOLD_SEC),
+    # без pyannote.audio и без обращения к HuggingFace.
+    # Проверка токена удалена.
+
     task_id = uuid.uuid4()
     estimated = datetime.now(timezone.utc) + timedelta(minutes=2)
 
@@ -108,19 +113,22 @@ async def run_diarization(
         num_speakers=body.num_speakers,
     )
 
-    # E141: Реальная диаризация вместо stub (эвристика по паузам)
+    # E202: создаём новую сессию внутри _runner.
+    # Старая db закрывается сразу после возврата из run_diarization.
     async def _runner() -> None:
         try:
             _diarize_tasks[task_id]["status"] = "running"
 
+            from app.db.session import AsyncSessionLocal
             from app.services.diarization import diarization_service
 
-            result = await diarization_service.diarize_protocol(
-                db=db,
-                protocol_id=body.protocol_id,
-                min_speakers=body.min_speakers,
-                max_speakers=body.max_speakers,
-            )
+            async with AsyncSessionLocal() as runner_db:
+                result = await diarization_service.diarize_protocol(
+                    db=runner_db,
+                    protocol_id=body.protocol_id,
+                    min_speakers=body.min_speakers,
+                    max_speakers=body.max_speakers,
+                )
 
             _diarize_tasks[task_id]["status"] = "completed"
             _diarize_tasks[task_id]["result_id"] = str(result.id)
@@ -138,7 +146,7 @@ async def run_diarization(
                 error=str(exc),
             )
 
-    # Сохраняем db для использования в _runner
+    # E202: убрано сохранение db (нельзя использовать после возврата)
     # E141: asyncio.create_task вместо background_tasks (как в transcribe)
     bg_task = asyncio.create_task(_runner())
     _active_diarize_tasks[task_id] = bg_task  # регистрируем

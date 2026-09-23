@@ -40,7 +40,8 @@ function matchRoute(hash) {
     }
 
     // Dynamic routes
-    const protocolMatch = hash.match(/^#\/protocols\/([a-f0-9-]+)(\/(speakers|transcript))?/);
+    // E228: добавлен флаг A (uppercase) и якорь на длину UUID 36
+    const protocolMatch = hash.match(/^#\/protocols\/([a-fA-F0-9-]{36})(\/(speakers|transcript))?/);
     if (protocolMatch) {
         const [, protocolId, subRoute] = protocolMatch;
         if (subRoute === '/speakers') {
@@ -52,7 +53,20 @@ function matchRoute(hash) {
     return null;
 }
 
+// E227: защита от двойного вызова router() (DOMContentLoaded + hashchange)
+let _routerRunning = false;
+
 async function router() {
+    if (_routerRunning) return;  // E227: уже выполняется — пропускаем
+    _routerRunning = true;
+    try {
+        await _routerImpl();
+    } finally {
+        _routerRunning = false;
+    }
+}
+
+async function _routerImpl() {
     const hash = window.location.hash || '#/';
     const root = document.getElementById('view-root');
 
@@ -81,10 +95,14 @@ async function router() {
     }
 }
 
-// Health check on load
+// E229: используем window.API_BASE_URL (задаётся в api/client.js)
 async function checkBackend() {
+    // API_BASE = "http://127.0.0.1:8000/api/v1/hmp"
+    // /health — на корне backend, без /api/v1/hmp
+    const apiBase = window.API_BASE_URL || 'http://127.0.0.1:8000/api/v1/hmp';
+    const root = apiBase.replace(/\/api\/v1\/hmp\/?$/, '');
     try {
-        const res = await fetch('http://127.0.0.1:8000/health');
+        const res = await fetch(`${root}/health`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         console.log('Backend OK:', data);

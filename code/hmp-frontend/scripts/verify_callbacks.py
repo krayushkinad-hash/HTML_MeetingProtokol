@@ -17,6 +17,7 @@ If errors found:
 import argparse
 import re
 import shutil
+import subprocess  # E221: для команды diff
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,25 @@ def find_handlers_in_js(js_file):
     ):
         handler = m.group(2)
         if handler not in ("async", "await", "function"):
+            handlers.append((m.group(1), handler, text[:m.start()].count("\n") + 1))
+
+    # E222: Pattern 3: addEventListener('event', (args) => handler(...))
+    # или (e) => handler(e), (btn, ev) => handler(btn, ev)
+    for m in re.finditer(
+        r"\.addEventListener\(['\"]([\w-]+)['\"],\s*(?:async\s+)?\(\s*[a-z_][\w,\s]*\)\s*=>\s*([a-z_][a-z0-9_]*)\s*\(",
+        text,
+    ):
+        handler = m.group(2)
+        if handler not in ("async", "await", "function"):
+            handlers.append((m.group(1), handler, text[:m.start()].count("\n") + 1))
+
+    # E222: Pattern 4: addEventListener('event', obj.method)
+    for m in re.finditer(
+        r"\.addEventListener\(['\"]([\w-]+)['\"],\s*([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)\)",
+        text,
+    ):
+        handler = m.group(2)
+        if "." in handler and not handler.startswith("."):  # избегаем .bind
             handlers.append((m.group(1), handler, text[:m.start()].count("\n") + 1))
 
     return handlers
