@@ -888,4 +888,127 @@ async def _get_progress_internal(
     }
 
 
+
+
+
+# ----------------------------------------------------------------------------
+# POST /transcribe/upgrade/{protocol_id}  (E162)
+# ----------------------------------------------------------------------------
+
+
+@router.post(
+    "/transcribe/upgrade/{protocol_id}",
+    summary="Upgrade low-confidence segments with larger model (US-086)",
+)
+async def upgrade_weak_segments_endpoint(
+    protocol_id: str,
+    target_model: str = "large-v3",  # E162: default large-v3
+    confidence_threshold: float = 0.7,  # E162: < threshold → upgrade
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """E162: повторно распознать только слабые сегменты (confidence < threshold) большой моделью.
+
+    Стратегия:
+    1. Загружаем все Utterance для протокола
+    2. Отбираем те, у которых confidence < threshold
+    3. Запускаем большую модель только на этих аудио-фрагментах
+    4. Обновляем text и confidence в БД
+
+    Возвращает статистику: сколько обработано / улучшено.
+    """
+    from sqlalchemy import select as _sel
+    from app.db.models import Utterance as _Utter
+    from app.db.models import Protocol as _Prot
+    from app.db.models import AudioFile as _AF
+    from pathlib import Path as _Path
+    import tempfile as _tempfile
+
+    try:
+        pid = uuid.UUID(protocol_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Невалидный protocol_id")
+
+    proto = await db.get(_Prot, pid)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Протокол не найден")
+
+    # Найти аудиофайл
+    if not proto.audio_file_id:
+        raise HTTPException(status_code=400, detail="Протокол без аудиофайла")
+    audio_file = await db.get(_AF, proto.audio_file_id)
+    if not audio_file:
+        raise HTTPException(status_code=400, detail="Аудиофайл не найден")
+    audio_path = _Path(audio_file.file_path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=400, detail=f"Аудио не найдено: {audio_path}")
+
+    # Загружаем все Utterance для протокола с confidence < threshold
+    # либо low_confidence=True (даже без численного confidence)
+    weak_q = await db.execute(
+        _sel(_Utter)
+        .where(
+            _Utter.protocol_id == pid,
+            (
+                (_Utter.confidence.isnot(None) & (_Utter.confidence < confidence_threshold))
+                | (_Utter.confidence.is_(None))
+                | (_Utter.low_confidence.is_(True))
+            ),
+        )
+        .order_by(_Utter.start_sec.asc())
+    )
+    weak_segments = list(weak_q.scalars().all())
+
+    if not weak_segments:
+        return {
+            "protocol_id": protocol_id,
+            "target_model": target_model,
+            "weak_segments_found": 0,
+            "upgraded": 0,
+            "skipped": 0,
+            "message": "Нет слабых сегментов для улучшения",
+        }
+
+    logger.info(
+        "upgrade_weak_segments_start",
+        protocol_id=protocol_id,
+        target_model=target_model,
+        weak_count=len(weak_segments),
+        threshold=confidence_threshold,
+    )
+
+    # Запускаем большую модель — она будет работать по всему аудио,
+    # но мы сохраним только результаты для "слабых" сегментов
+    # (Whisper не умеет resume с произвольной секунды — см. E152)
+    try:
+        from app.services.transcription import transcription_service
+
+        # Запускаем как обычную транскрибацию но пишем ТОЛЬКО обновления
+        # Для упрощения — пересчитываем всю дорожку и сравниваем по start_sec
+        result = await transcription_service.transcribe(
+            protocol_id=pid,
+            audio_path=audio_path,
+            task_id=uuid.uuid4(),  # НЕ реальная задача — только для логов
+            duration_sec=audio_file.duration_sec,
+            target_model_override=target_model,  # E162: используем large
+            only_update_weak=True,               # E162: обновляем только слабые
+        )
+    except Exception as exc:
+        logger.exception("upgrade_weak_segments_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+    # Подсчитать сколько сегментов реально улучшились
+    upgraded_count = 0
+    for seg in weak_segments:
+        await db.refresh(seg)
+        if seg.confidence is not None and seg.confidence >= confidence_threshold:
+            upgraded_count += 1
+
+    return {
+        "protocol_id": protocol_id,
+        "target_model": target_model,
+        "weak_segments_found": len(weak_segments),
+        "upgraded": upgraded_count,
+        "message": f"Улучшено {upgraded_count}/{len(weak_segments)} сегментов моделью {target_model}",
+    }
+
 # E124: _DummyStatus class удалён — transcribe() создаёт правильный TranscriptionStatus

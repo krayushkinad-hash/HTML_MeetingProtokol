@@ -213,7 +213,9 @@ function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags,
     tabBar.onChange(tabId => switchTab(tabId, protocol, utterances, speakers, summary, tags, actionItems));
 
     // Рендерим все панели (но показываем только активную)
-    renderTranscriptTab(rootEl, protocol, utterances, speakers);
+    renderTranscriptTab(rootEl, protocol, utterances, speakers).catch(e =>
+        console.warn('renderTranscriptTab:', e),
+    );
     renderScreenshotsTab(rootEl, protocol, []);
     renderDecisionsTab(rootEl, protocol);
     renderTasksTab(rootEl, protocol, actionItems);
@@ -283,7 +285,7 @@ function switchTab(tabId, protocol, utterances, speakers, summary, tags, actionI
 // Tab renderers (to be expanded in next iteration)
 // ────────────────────────────────────────────────────────────
 
-function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
+async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
     const panel = rootEl.querySelector('#panel-transcript');
     // E138: убираем hidden чтобы панель была видна
     if (panel) panel.removeAttribute('hidden');
@@ -313,6 +315,7 @@ function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
     }
     panel.innerHTML = `
         <div class="transcript-toolbar">
+            <button class="btn" id="btn-upgrade-weak" title="E162: улучшить слабые сегменты большой моделью">🚀 Улучшить слабые</button>
             <button class="btn" id="btn-check-all-grammar" title="E154: проверить грамматику всех реплик">🔍 Проверить всё</button>
             <button class="btn" id="btn-apply-all-corrections" title="E154: применить все исправления сразу" style="display:none;">✏️ Применить всё</button>
             <button class="btn" id="btn-cleanup-ai">✨ Исправить через AI</button>
@@ -986,6 +989,40 @@ function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
             } finally {
                 btnExtract.disabled = false;
                 btnExtract.innerHTML = btnText;
+            }
+        });
+    }
+
+    // E162: Кнопка "🚀 Улучшить слабые" — upgrade endpoint
+    const btnUpgrade = panel.querySelector('#btn-upgrade-weak');
+    if (btnUpgrade) {
+        btnUpgrade.addEventListener('click', async () => {
+            const btnText = btnUpgrade.innerHTML;
+            try {
+                btnUpgrade.disabled = true;
+                btnUpgrade.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Улучшаю...';
+                toast.info('Запускаю большую модель для слабых сегментов...');
+
+                const result = await api.upgradeWeakSegments(protocol.id, {
+                    target_model: 'large-v3',
+                    confidence_threshold: 0.7,
+                });
+
+                if (!result || result.weak_segments_found === 0) {
+                    toast.success('Нет слабых сегментов для улучшения!');
+                    return;
+                }
+
+                toast.success(`Найдено ${result.weak_segments_found} слабых, улучшено ${result.upgraded}`);
+
+                // Перезагрузить страницу чтобы увидеть новые тексты
+                setTimeout(() => window.location.reload(), 1500);
+            } catch (err) {
+                console.error('Upgrade failed:', err);
+                toast.error(`Не удалось: ${err.message || err}`);
+            } finally {
+                btnUpgrade.disabled = false;
+                btnUpgrade.innerHTML = btnText;
             }
         });
     }

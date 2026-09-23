@@ -257,10 +257,15 @@ export const api = {
     setActiveWhisperModel: (name) => request('POST', `/whisper/active/${name}`),
     getWhisperModelStatus: (name) => request('GET', `/whisper/status/${name}`),
     deleteWhisperModel: (name) => request('DELETE', `/whisper/models/${name}`),
-};    // E147: AI auto-extract decisions
-    extractDecisions: (data) => request('POST', '/ai/extract-decisions', { body: data }),    // E149: AI translation
-    translateUtterances: (data) => request('POST', '/ai/translate', { body: data }),    // E150: Pause / Resume transcription
+    // E147: AI auto-extract decisions
+    extractDecisions: (data) => request('POST', '/ai/extract-decisions', { body: data }),
+    // E149: AI translation
+    translateUtterances: (data) => request('POST', '/ai/translate', { body: data }),
+    // E150: Pause / Resume transcription
     pauseTranscription: (taskId) => request('POST', `/transcribe/pause/${taskId}`),
-    resumeTranscription: (taskId) => request('POST', `/transcribe/resume/${taskId}`),    // E154: Grammar/spelling check
+    resumeTranscription: (taskId) => request('POST', `/transcribe/resume/${taskId}`),
+    // E154: Grammar/spelling check
     checkGrammar: (data) => request('POST', '/ai/check-grammar', { body: data }),
     updateUtteranceText: (id, data) => request('PUT', `/utterances/${id}/text`, { body: data }),
+};    // E162: Upgrade low-confidence segments
+    upgradeWeakSegments: (protocolId, data = {}) => request('POST', `/transcribe/upgrade/${protocolId}`, { body: data }),

@@ -9,9 +9,8 @@ the contract is stable and tests can run):
     POST /ai/review-transcript   — review transcript quality (US-049)
     POST /ai/semantic-search     — semantic search (TODO: embeddings)
 """
-from __future__ import annotations
-
 import uuid
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field

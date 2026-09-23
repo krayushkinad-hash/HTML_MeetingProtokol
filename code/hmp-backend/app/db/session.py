@@ -226,14 +226,43 @@ async def init_db() -> None:
                             _def = ""
                             if hasattr(_col, 'server_default') and _col.server_default is not None:
                                 _sd = _col.server_default.arg if hasattr(_col.server_default, 'arg') else str(_col.server_default)
+                                # E159: цитировать DEFAULT если это литерал-строка без кавычек
+                                if isinstance(_sd, str) and not (_sd.startswith("'") or _sd.lower() in (
+                                    "true", "false", "null", "current_timestamp"
+                                )):
+                                    # Экранируем одинарные кавычки внутри
+                                    _sd_escaped = _sd.replace("'", "''")
+                                    _sd = f"'{_sd_escaped}'"
                                 _def = f" DEFAULT {_sd}"
 
-                            await conn.execute(text(
-                                f'ALTER TABLE "{_table}" ADD COLUMN IF NOT EXISTS "{_col_name}" {_type}{_null}{_def}'
-                            ))
-                            logger.info("column_added", table=_table, column=_col_name)
+                            # E159: каждая колонка в отдельной транзакции, чтобы
+                            # ошибка одной не убивала все остальные
+                            try:
+                                await conn.execute(text(
+                                    f'ALTER TABLE "{_table}" ADD COLUMN IF NOT EXISTS "{_col_name}" {_type}{_null}{_def}'
+                                ))
+                                # Принудительный commit после каждой ALTER TABLE
+                                await conn.commit()
+                                logger.info("column_added", table=_table, column=_col_name)
+                            except Exception as col_err:
+                                # Rollback чтобы транзакция не была aborted
+                                try:
+                                    await conn.rollback()
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    "column_add_failed",
+                                    table=_table,
+                                    column=_col_name,
+                                    error=str(col_err)[:200],
+                                )
                 except Exception as e:
                     logger.warning("auto_migration_warning", table=_table, error=str(e))
+                    # Rollback чтобы следующая таблица могла работать
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass
 
         # Step 5: Final commit + then SELECT in a NEW session (after all DDL committed)
         async with AsyncSessionLocal() as session:

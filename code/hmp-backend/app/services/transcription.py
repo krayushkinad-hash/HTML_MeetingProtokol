@@ -90,6 +90,9 @@ class TranscriptionService:
                     use_compute = "int8"
 
             primary = settings.whisper_model
+            # E162: для upgrade endpoint используем конкретную модель
+            if hasattr(self, '_target_model_override') and self._target_model_override:
+                primary = self._target_model_override
             try:
                 logger.info("loading_whisper_model", model=primary, device=use_device)
                 self._model = WhisperModel(
@@ -130,6 +133,8 @@ class TranscriptionService:
         duration_sec: float | None = None,
         already_done_segments: list | None = None,  # E150: для resume
         resume_from_sec: float | None = None,        # E150: для resume
+        target_model_override: str | None = None,    # E162: для upgrade endpoint
+        only_update_weak: bool = False,                # E162: обновлять только слабые
     ) -> TranscriptionStatus:
         """Transcribe audio file with progress tracking.
 
@@ -208,22 +213,35 @@ class TranscriptionService:
                     break
 
             # E131: удаляем старые utterances для этого протокола (перезапись)
-            try:
-                from sqlalchemy import delete
-                from app.db.session import AsyncSessionLocal
-                from app.db.models import Utterance as _OldU
-                async with AsyncSessionLocal() as clean_session:
-                    await clean_session.execute(
-                        delete(_OldU).where(_OldU.protocol_id == protocol_id)
+            # E162: для upgrade — НЕ удаляем, обновляем только слабые
+            if not only_update_weak:
+                try:
+                    from sqlalchemy import delete
+                    from app.db.session import AsyncSessionLocal
+                    from app.db.models import Utterance as _OldU
+                    async with AsyncSessionLocal() as clean_session:
+                        await clean_session.execute(
+                            delete(_OldU).where(_OldU.protocol_id == protocol_id)
+                        )
+                        await clean_session.commit()
+                    logger.info("old_utterances_cleared", protocol_id=str(protocol_id))
+                except Exception as clear_err:
+                    logger.warning(
+                        "old_utterances_clear_failed",
+                        protocol_id=str(protocol_id),
+                        error=str(clear_err),
                     )
-                    await clean_session.commit()
-                logger.info("old_utterances_cleared", protocol_id=str(protocol_id))
-            except Exception as clear_err:
-                logger.warning(
-                    "old_utterances_clear_failed",
+            else:
+                logger.info(
+                    "upgrade_mode_skip_clear",
                     protocol_id=str(protocol_id),
-                    error=str(clear_err),
+                    note="only_update_weak=True, will update in place",
                 )
+
+            # E162: устанавливаем override модель ДО вызова _load_model
+            if target_model_override:
+                self._target_model_override = target_model_override
+                logger.info("using_override_model", model=target_model_override)
 
             model = await asyncio.to_thread(self._load_model)
             logger.info(
@@ -621,23 +639,56 @@ class TranscriptionService:
                     grouped.append(current)
 
                 async with AsyncSessionLocal() as session:
+                    from sqlalchemy import select as _sel
+
                     for g in grouped:
                         merged_text = " ".join(t.strip() for t in g["texts"] if t.strip()).strip()
                         if not merged_text:
                             continue
-                        u = Utterance(
-                            protocol_id=protocol_id,
-                            speaker_id=None,
-                            start_sec=Decimal(str(round(g["start"], 3))),
-                            end_sec=Decimal(str(round(g["end"], 3))),
-                            text=merged_text,
-                            text_original=merged_text,
-                            confidence=None,
-                            low_confidence=False,
-                            important=False,
-                            corrected_by_llm=False,
-                        )
-                        session.add(u)
+
+                        # E162: в upgrade-режиме — обновляем существующую Utterance по (start_sec, end_sec)
+                        # вместо создания новой (иначе будут дубли)
+                        existing = None
+                        if only_update_weak:
+                            existing_q = await session.execute(
+                                _sel(Utterance).where(
+                                    Utterance.protocol_id == protocol_id,
+                                    Utterance.start_sec >= Decimal(str(g["start"])) - Decimal("0.5"),
+                                    Utterance.start_sec <= Decimal(str(g["start"])) + Decimal("0.5"),
+                                ).limit(1)
+                            )
+                            existing = existing_q.scalar_one_or_none()
+
+                        if existing:
+                            # E162: обновить text (confidence считается в момент сохранения ниже)
+                            existing.text = merged_text
+                        else:
+                            # E162: confidence из avg_logprob если есть
+                            import math as _math
+                            conf = None
+                            # batch может содержать несколько seg; берём среднее
+                            avg_logs = [
+                                float(s.get("avg_logprob"))
+                                for s in [seg]
+                                if s.get("avg_logprob") is not None
+                            ]
+                            if avg_logs:
+                                mean_alp = sum(avg_logs) / len(avg_logs)
+                                conf = Decimal(str(round(min(1.0, max(0.0, _math.exp(mean_alp))), 3)))
+
+                            u = Utterance(
+                                protocol_id=protocol_id,
+                                speaker_id=None,
+                                start_sec=Decimal(str(round(g["start"], 3))),
+                                end_sec=Decimal(str(round(g["end"], 3))),
+                                text=merged_text,
+                                text_original=merged_text,
+                                confidence=conf,
+                                low_confidence=(conf is not None and conf < Decimal("0.4")),
+                                important=False,
+                                corrected_by_llm=False,
+                            )
+                            session.add(u)
                     await session.commit()
                 batch_total += len(grouped)
                 logger.info(

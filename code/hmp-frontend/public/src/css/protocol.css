@@ -63,10 +63,27 @@ tab-bar {
 /* === Transcript === */
 .transcript-toolbar {
     display: flex;
-    justify-content: space-between;
+    flex-wrap: wrap;  /* E161: разрешаем перенос на узких экранах */
+    gap: 4px;
+    justify-content: flex-start;
     align-items: center;
-    margin-bottom: 12px;
-    padding: 8px 0;
+    margin-bottom: 8px;
+    padding: 6px 0;
+}
+.transcript-toolbar .btn,
+.transcript-toolbar .select-tiny {
+    padding: 4px 8px;
+    font-size: 11px;
+    white-space: nowrap;
+    height: 28px;
+}
+.transcript-toolbar .text-muted#transcript-counter,
+.transcript-toolbar #transcript-counter {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .transcript-list {
@@ -82,11 +99,16 @@ tab-bar {
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 4px 10px;        /* E143: компактнее */
+    padding: 3px 8px;          /* E161: минимальная высота */
     margin-bottom: 2px;
     cursor: pointer;
-    transition: background 0.15s;
-    min-height: 0;            /* высота по содержимому */
+    transition: all 0.2s;
+    min-width: 0;
+}
+
+.utterance-item:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
 }
 
 .utterance-item:hover,
@@ -150,18 +172,29 @@ tab-bar {
 .utterance-actions {
     margin-left: auto;
     display: inline-flex;
-    gap: 4px;
+    gap: 2px;
+    flex-shrink: 0;  /* E161: кнопки не сжимаются */
+}
+.utterance-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    flex-wrap: wrap;  /* E161: перенос на узких экранах */
+    min-width: 0;
 }
 .btn-tiny {
     background: transparent;
     border: 1px solid var(--border);
     border-radius: 3px;
-    padding: 1px 4px;
+    padding: 0 4px;       /* E161: компактнее */
     font-size: 11px;
+    line-height: 18px;    /* E161: явная высота */
+    height: 20px;
     cursor: pointer;
     color: var(--text-muted);
     transition: all 0.15s;
-    line-height: 1.2;
+    white-space: nowrap;
 }
 .btn-tiny:hover {
     background: var(--bg-tertiary);

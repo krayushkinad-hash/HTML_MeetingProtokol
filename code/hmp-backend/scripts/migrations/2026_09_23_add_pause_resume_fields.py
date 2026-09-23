@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
