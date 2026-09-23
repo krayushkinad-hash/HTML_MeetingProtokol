@@ -1,0 +1,102 @@
+# =============================================================================
+# HTML_MeetingProtokol — Multi-stage production Dockerfile
+# Stage 1 (builder): install build deps + Python wheels
+# Stage 2 (runtime): minimal image with non-root user
+# Target: final image < 800 MB
+# =============================================================================
+
+# ============================================================================
+# Stage 1 — BUILDER
+# ============================================================================
+FROM python:3.11-slim AS builder
+
+# Build tooling + audio/video deps needed at compile time
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        gcc \
+        g++ \
+        git \
+        curl \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Faster, deterministic installs via uv
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir uv
+
+# Copy ONLY dependency manifest first → cache layer
+COPY pyproject.toml ./
+
+# Install into an isolated prefix we can copy from
+RUN uv venv /opt/venv \
+    && . /opt/venv/bin/activate \
+    && uv pip install --no-cache .
+
+# ============================================================================
+# Stage 2 — RUNTIME
+# ============================================================================
+FROM python:3.11-slim AS runtime
+
+# Labels
+LABEL org.opencontainers.image.title="HTML_MeetingProtokol backend"
+LABEL org.opencontainers.image.description="FastAPI backend for meeting protocol generation"
+LABEL org.opencontainers.image.source="https://github.com/example/hmp-backend"
+
+# Runtime-only system packages (no gcc/g++/git in final image)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        curl \
+        tini \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean
+
+# Create non-root user
+RUN groupadd --system --gid 1000 hmp \
+    && useradd --system --uid 1000 --gid hmp \
+       --home-dir /home/hmp --shell /usr/sbin/nologin \
+       --comment "HMP backend service account" hmp
+
+WORKDIR /app
+
+# Copy Python venv from builder
+COPY --from=builder --chown=hmp:hmp /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Copy application code
+COPY --chown=hmp:hmp app ./app
+COPY --chown=hmp:hmp alembic ./alembic
+COPY --chown=hmp:hmp alembic.ini ./
+
+# Pre-create data directories owned by hmp
+RUN mkdir -p /home/hmp/.html_mp/protocols \
+             /home/hmp/.html_mp/backup \
+             /app/logs \
+    && chown -R hmp:hmp /home/hmp /app/logs
+
+USER hmp
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
+    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+
+# tini = PID 1, reaps zombies, forwards signals
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Single worker per ADR-009 (memory-bounded transcription workloads)
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--proxy-headers", \
+     "--forwarded-allow-ips", "*", \
+     "--access-log", \
+     "--no-server-header"]

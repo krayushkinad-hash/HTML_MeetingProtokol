@@ -1,0 +1,135 @@
+/* ====== Базовые стили HTML_MeetingProtokol ====== */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --color-bg: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-text: #1f2937;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-border: #e5e7eb;
+  --color-danger: #dc2626;
+  --color-success: #16a34a;
+  --radius: 6px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+header {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+header h1 {
+  font-size: 20px;
+}
+
+nav button {
+  background: none;
+  border: 1px solid var(--color-border);
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  margin-left: 8px;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+
+nav button:hover {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+main {
+  max-width: 960px;
+  margin: 24px auto;
+  padding: 0 24px;
+}
+
+.placeholder {
+  color: var(--color-muted);
+  text-align: center;
+  padding: 48px 0;
+}
+
+footer {
+  text-align: center;
+  padding: 24px;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+/* Карточки протоколов */
+.protocol-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.protocol-card:hover {
+  transform: translateY(-2px);
+}
+
+/* Формы */
+form .field {
+  margin-bottom: 16px;
+}
+
+form label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+form input,
+form textarea,
+form select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+form button[type="submit"] {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+form button[type="submit"]:hover {
+  background: var(--color-primary-hover);
+}
+
+@media print {
+  header, footer, nav { display: none; }
+  main { margin: 0; padding: 0; }
+}

@@ -1,0 +1,785 @@
+/* ============================================================
+ * Protocol Detail View — стили для F-HMP-2, F-HMP-4, F-HMP-5
+ * ============================================================ */
+
+/* === Header === */
+.protocol-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.protocol-header h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0;
+}
+
+.protocol-meta {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* === Video Player === */
+#video-container {
+    margin-bottom: 24px;
+}
+
+/* E180: video-player стили удалены — компонент больше не используется.
+   Используется только initMediaPlayer() с нативным <video>/<audio>. */
+
+/* === Tabs === */
+tab-bar {
+    display: block;
+    margin-bottom: 16px;
+}
+
+/* === Panels === */
+[role="tabpanel"] {
+    min-height: 240px;
+    animation: fadeIn 0.2s ease;
+}
+
+[role="tabpanel"]:not([hidden]) {
+    display: block;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* === Transcript === */
+.transcript-toolbar {
+    display: flex;
+    flex-wrap: wrap;  /* E161: разрешаем перенос на узких экранах */
+    gap: 4px;
+    justify-content: flex-start;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 6px 0;
+}
+.transcript-toolbar .btn,
+.transcript-toolbar .select-tiny {
+    padding: 4px 8px;
+    font-size: 11px;
+    white-space: nowrap;
+    height: 28px;
+}
+.transcript-toolbar .text-muted#transcript-counter,
+.transcript-toolbar #transcript-counter {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.transcript-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding-right: 8px;
+}
+
+.utterance-item {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;          /* E161: минимальная высота */
+    margin-bottom: 2px;
+    cursor: pointer;
+    transition: all 0.2s;
+    min-width: 0;
+}
+
+.utterance-item:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+
+.utterance-item:hover,
+.utterance-item:focus-visible {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+    outline: none;
+}
+
+.utterance-meta {
+    display: flex;            /* E143: meta и текст на одной строке */
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 0;
+    font-size: 11px;         /* мельче */
+    color: var(--text-muted);
+}
+
+.speaker-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    color: white;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    line-height: 1.4;
+}
+
+.timestamp {
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    font-size: 11px;
+}
+
+.timestamp:hover {
+    color: var(--accent);
+}
+
+.confidence-bar {
+    flex: 0 0 40px;           /* E143: уже */
+    height: 2px;
+    background: var(--bg-tertiary);
+    border-radius: 1px;
+    overflow: hidden;
+}
+
+.conf-fill {
+    display: block;
+    height: 100%;
+    transition: width 0.3s;
+}
+
+.conf-success { background: var(--success); }
+.conf-warning { background: var(--warning); }
+.conf-danger { background: var(--danger); }
+
+/* E146: Кнопки пометки решения в плашках */
+.utterance-actions {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 2px;
+    flex-shrink: 0;  /* E161: кнопки не сжимаются */
+}
+.utterance-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    flex-wrap: wrap;  /* E161: перенос на узких экранах */
+    min-width: 0;
+}
+.btn-tiny {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;       /* E161: компактнее */
+    font-size: 11px;
+    line-height: 18px;    /* E161: явная высота */
+    height: 20px;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.btn-tiny:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.btn-mark-decision:hover {
+    color: var(--success);
+    border-color: var(--success);
+}
+.btn-decision-marked {
+    color: var(--success);
+    border-color: var(--success);
+    background: rgba(16, 185, 129, 0.08);
+}
+.utterance-item.is-decision {
+    border-left: 3px solid var(--success);
+    background: rgba(16, 185, 129, 0.04);
+}
+.decision-mark {
+    margin-left: 6px;
+    color: var(--success);
+    font-weight: bold;
+}
+
+/* E148/E149: Язык + перевод */
+.select-tiny {
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+.utterance-translation {
+    margin-top: 2px;
+    padding: 4px 10px;
+    background: rgba(59, 130, 246, 0.06);
+    border-left: 2px solid var(--accent);
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+.translation-label {
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-right: 4px;
+}
+
+/* E154: Inline-edit + grammar check */
+.utterance-editor {
+    width: 100%;
+    padding: 6px 10px;
+    margin-top: 4px;
+    font-size: 14px;
+    border: 2px solid var(--accent);
+    border-radius: 4px;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 40px;
+}
+.btn-save-utterance, .btn-cancel-edit {
+    margin-top: 4px;
+    margin-right: 4px;
+}
+.grammar-issues {
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: rgba(245, 158, 11, 0.08);
+    border-left: 3px solid var(--warning);
+    font-size: 12px;
+    line-height: 1.4;
+}
+.grammar-issues-count {
+    font-weight: 600;
+    color: var(--warning);
+    display: block;
+    margin-bottom: 4px;
+}
+.grammar-issue {
+    padding: 2px 0;
+}
+.grammar-issue-rule {
+    color: var(--text-muted);
+    font-family: monospace;
+    margin-right: 4px;
+}
+.grammar-issue-original {
+    background: rgba(239, 68, 68, 0.1);
+    text-decoration: line-through;
+    color: var(--danger);
+}
+.grammar-issue-suggestion {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success);
+    font-weight: 500;
+}
+.grammar-issue-desc {
+    font-size: 11px;
+    margin-left: 4px;
+}
+.btn-apply-corrections {
+    margin-top: 4px;
+    background: var(--success);
+    color: white;
+    border-color: var(--success);
+}
+.utterance-item.has-issues {
+    border-left: 3px solid var(--warning);
+}
+
+.utterance-text {
+    font-size: 14px;
+    line-height: 1.3;         /* E143: плотнее */
+    color: var(--text-primary);
+    margin: 0;                /* без отступа */
+}
+
+/* === Screenshots === */
+.screenshots-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+}
+
+.screenshot-card {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.screenshot-card:hover {
+    transform: scale(1.02);
+}
+
+.screenshot-card img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    display: block;
+}
+
+.screenshot-card time {
+    display: block;
+    padding: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* === Tasks === */
+.tasks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.task-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    border-left: 3px solid var(--accent);
+}
+
+.task-card input[type="checkbox"] {
+    margin-top: 4px;
+    accent-color: var(--accent);
+}
+
+.task-content {
+    flex: 1;
+}
+
+.task-title {
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.task-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+/* === Summary === */
+.summary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+}
+
+.summary-content {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    line-height: 1.7;
+    font-size: 15px;
+}
+
+.summary-content h2 {
+    font-size: 20px;
+    margin: 16px 0 8px;
+    color: var(--accent);
+}
+
+.summary-content h3 {
+    font-size: 17px;
+    margin: 12px 0 6px;
+}
+
+.summary-content p {
+    margin-bottom: 12px;
+}
+
+.summary-content strong {
+    font-weight: 600;
+    color: var(--accent);
+}
+
+/* === Speakers === */
+.speakers-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.speaker-card {
+    background: var(--bg-secondary);
+    padding: 12px 16px;
+    border-radius: 8px;
+}
+
+.speaker-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.speaker-stats {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* === Responsive === */
+@media (max-width: 768px) {
+    .protocol-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .protocol-header .actions {
+        width: 100%;
+        display: flex;
+        gap: 8px;
+    }
+    .protocol-header .actions button {
+        flex: 1;
+    }
+    .protocol-meta {
+        font-size: 12px;
+    }
+}
+
+/* E163: Прогресс-бар при ошибке */
+.progress-failed {
+    background: var(--danger) !important;
+    animation: progress-failed-pulse 1.5s ease-in-out infinite;
+}
+@keyframes progress-failed-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+.transcribe-progress .progress-status {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 70%;
+}
+
+/* E170: Медиа-плеер */
+.media-player-wrapper {
+    margin-top: 12px;
+    margin-bottom: 16px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.media-player-wrapper video {
+    display: block;
+    width: 100%;
+    max-height: 360px;
+    background: #000;
+    border-radius: 6px;
+}
+.media-player-wrapper audio {
+    width: 100%;
+    margin-top: 4px;
+}
+.media-player-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    flex-wrap: wrap;
+}
+.media-player-controls .btn,
+.media-player-controls .btn-tiny {
+    padding: 6px 10px;
+}
+.media-player-controls input[type="range"] {
+    flex: 1;
+    min-width: 120px;
+    height: 4px;
+    -webkit-appearance: none;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+}
+.media-player-controls input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+}
+.media-player-controls input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+}
+.utterance-meta .timestamp {
+    cursor: pointer;
+    color: var(--accent);
+    font-family: monospace;
+    padding: 0 4px;
+    border-radius: 3px;
+    transition: background 0.15s;
+}
+.utterance-meta .timestamp:hover {
+    background: var(--bg-tertiary);
+    text-decoration: underline;
+}
+
+/* E172: Закладка "Важное" */
+.utterance-item.is-important {
+    border-left: 3px solid #fbbf24;
+    background: rgba(251, 191, 36, 0.04);
+}
+.btn-mark-important {
+    color: var(--text-muted);
+    border-color: var(--border);
+}
+.btn-mark-important:hover {
+    color: #fbbf24;
+    border-color: #fbbf24;
+}
+.btn-important-marked {
+    color: #fbbf24;
+    border-color: #fbbf24;
+    background: rgba(251, 191, 36, 0.08);
+}
+.important-mark {
+    color: #fbbf24;
+    font-weight: bold;
+    margin-left: 6px;
+}
+
+/* E231: иконка низкой уверенности */
+.low-conf-mark {
+    margin-left: 4px;
+    font-weight: bold;
+}
+
+/* E232: badge в табе "Важное" */
+.tab-badge {
+    margin-left: 4px;
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+/* E242: inline-edit для атрибутов протокола */
+.editable-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.editable-meta .btn-edit-meta {
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.editable-meta:hover .btn-edit-meta {
+    opacity: 1;
+}
+h1.editable-meta {
+    display: inline-flex !important;
+    align-items: baseline;
+    gap: 8px;
+}
+
+/* E242: модальное окно для редактирования атрибутов протокола */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(2px);
+}
+.modal-dialog {
+    background: var(--bg-primary, #fff);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    max-width: 560px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: modal-fade-in 0.18s ease-out;
+}
+@keyframes modal-fade-in {
+    from { opacity: 0; transform: translateY(-12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border, #d4d8de);
+}
+.modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+.modal-close {
+    background: transparent;
+    border: none;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text-secondary, #5a6470);
+    padding: 0 6px;
+}
+.modal-close:hover {
+    color: var(--text-primary, #1a1a1a);
+}
+.modal-body {
+    padding: 20px;
+}
+.modal-body .form-group {
+    margin-bottom: 14px;
+}
+.modal-body label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    color: var(--text-secondary, #5a6470);
+}
+.modal-body input,
+.modal-body textarea,
+.modal-body select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: inherit;
+    box-sizing: border-box;
+    background: var(--bg-primary, #fff);
+    color: var(--text-primary, #1a1a1a);
+}
+.modal-body input:focus,
+.modal-body textarea:focus,
+.modal-body select:focus {
+    outline: none;
+    border-color: var(--accent, #3b82f6);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+.form-error {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border, #d4d8de);
+}
+.modal-actions .btn {
+    padding: 8px 16px;
+}
+.btn-edit-protocol {
+    margin-left: 12px;
+    padding: 4px 10px;
+    font-size: 13px;
+    background: transparent;
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 6px;
+    color: var(--text-secondary, #5a6470);
+    cursor: pointer;
+}
+.btn-edit-protocol:hover {
+    background: var(--bg-secondary, #f5f6f8);
+    color: var(--text-primary, #1a1a1a);
+}
+
+/* E253: отдельный прогресс-бар для удалённого Whisper */
+.transcribe-progress-remote {
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    width: 380px;
+    background: var(--bg-primary, #fff);
+    border: 1px solid var(--border, #d4d8de);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: 12px 16px;
+    z-index: 9999;
+    font-family: inherit;
+}
+.transcribe-progress-remote .remote-progress-header {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary, #1a1a1a);
+}
+.transcribe-progress-remote .remote-progress-header i {
+    margin-right: 6px;
+    color: var(--accent, #3b82f6);
+}
+.transcribe-progress-remote .remote-progress-pct {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent, #3b82f6);
+}
+.transcribe-progress-remote .remote-progress-track {
+    height: 6px;
+    background: var(--bg-secondary, #f0f2f5);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+.transcribe-progress-remote .remote-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #3b82f6, #60a5fa);
+    transition: width 0.3s ease;
+}
+.transcribe-progress-remote .remote-progress-msg {
+    font-size: 12px;
+    color: var(--text-secondary, #5a6470);
+    line-height: 1.4;
+    word-break: break-word;
+}

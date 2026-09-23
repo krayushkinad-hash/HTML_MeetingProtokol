@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: hmp-postgres
+    environment:
+      POSTGRES_DB: html_mp
+      POSTGRES_USER: hmp
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hmp -d html_mp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hmp-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ~/.html_mp:/root/.html_mp  # Persist protocols + audio files
+      - ./logs:/app/logs
+    restart: unless-stopped
+    # Single worker per ADR-009
+    command: ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--workers", "1"]
+
+  # Optional: Ollama for local LLM (ADR-004)
+  ollama:
+    image: ollama/ollama:0.3.12
+    container_name: hmp-ollama
+    profiles: ["with-ollama"]  # Only start with: docker-compose --profile with-ollama up
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  pgdata:
+  ollama_data:

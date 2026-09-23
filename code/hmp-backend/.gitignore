@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Environment
+.env
+.env.local
+*.env.bak
+.env.prod           # production secrets — NEVER commit
+.env.prod.local
+.env.prod.bak
+
+# Data
+data/
+*.db
+*.sqlite
+*.sqlite3
+backups/
+
+# Logs
+*.log
+logs/
+
+# Build
+dist/
+build/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+Thumbs.db
+
+# Project-specific
+uploads/
+audio/
+video/
+screenshots/
+temp/

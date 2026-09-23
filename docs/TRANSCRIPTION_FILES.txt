@@ -1,0 +1,2107 @@
+/* ======================================================================
+ * FILE 1/4: code/hmp-backend/app/services/transcription.py
+ * ====================================================================== */
+
+"""Transcription service — Whisper integration (ADR-005).
+
+Background worker pattern: 1 worker per ADR-009.
+Chunks of 30 sec per NFR §QG-7.
+
+US-005: Real Whisper integration with progress tracking.
+"""
+import asyncio
+import time  # E119: used for transcribe_start_time / heartbeat elapsed
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
+
+from app.core.config import settings
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+# Локальный dataclass (НЕ модель БД)
+@dataclass
+class TranscriptionStatus:
+    id: uuid.UUID
+    protocol_id: uuid.UUID
+    status: Literal["queued", "processing", "paused", "completed", "failed", "cancelled"] = "queued"
+    progress_percent: int = 0
+    current_chunk: int | None = None
+    total_chunks: int | None = None
+    peak_rss_mb: float | None = None
+    estimated_completion: datetime | None = None
+    error_message: str | None = None
+    wer_quality: float | None = None
+    # E113: Human-readable status message for UI ("Инициализация...", "Обработка 30с...")
+    message: str | None = None
+
+
+class TranscriptionService:
+    """Async service for Whisper-based transcription."""
+
+    def __init__(self) -> None:
+        self._model = None  # Lazy-loaded
+        self._tasks: dict[uuid.UUID, TranscriptionStatus] = {}
+        # US-066: In-memory progress tracking (consumed by progress endpoint)
+        self._progress_callbacks: dict[uuid.UUID, callable] = {}
+
+    def _load_model(self):
+        """Lazy-load Whisper model.
+
+        US-005 + E052: Graceful handling of missing faster-whisper.
+        Install with: pip install faster-whisper
+        E111: Detect cudnn issues and fallback to CPU automatically.
+        """
+        if self._model is None:
+            from faster_whisper import WhisperModel
+
+            # E111: Auto-detect cudnn availability
+            use_device = settings.whisper_device
+            use_compute = settings.whisper_compute_type
+            if use_device == "cuda":
+                try:
+                    import ctypes
+                    # Try loading cudnn64_9.dll or cudnn64_8.dll
+                    for dll_name in ["cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll"]:
+                        try:
+                            ctypes.CDLL(dll_name)
+                            break
+                        except OSError:
+                            continue
+                    else:
+                        # No cudnn found
+                        logger.warning(
+                            "cudnn_not_found_fallback_to_cpu",
+                            attempted_dlls=["cudnn64_9.dll", "cudnn64_8.dll", "cudnn64_7.dll"],
+                        )
+                        use_device = "cpu"
+                        use_compute = "int8"
+                except Exception as cudnn_err:
+                    logger.warning("cudnn_check_failed", error=str(cudnn_err))
+                    use_device = "cpu"
+                    use_compute = "int8"
+
+            # Try primary model first (e.g., large-v3)
+            primary = settings.whisper_model
+            try:
+                logger.info("loading_whisper_model", model=primary, device=use_device)
+                self._model = WhisperModel(
+                    primary,
+                    device=use_device,
+                    compute_type=use_compute,
+                )
+                logger.info("whisper_model_loaded", model=primary, device=use_device)
+                return self._model
+            except Exception as e:
+                # E058: Fallback to tiny if primary fails (OOM, etc.)
+                logger.warning("whisper_primary_model_failed", primary=primary, error=str(e))
+
+            # Fallback to tiny
+            try:
+                logger.info("whisper_fallback_to_tiny", requested=primary)
+                self._model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                logger.info("whisper_fallback_loaded", model="tiny")
+                # E125: set fallback flag so transcribe() can notify user
+                self._last_fallback_reason = f"Модель '{primary}' не загрузилась, используется tiny"
+                return self._model
+            except Exception as fb_err:
+                logger.error("whisper_all_models_failed", error=str(fb_err))
+                raise RuntimeError(
+                    f"Не удалось загрузить Whisper. "
+                    f"Primary={primary}, Fallback=tiny. "
+                    f"Ошибка: {str(fb_err)}. "
+                    f"Установите: .venv\\Scripts\\pip install faster-whisper==1.0.3"
+                ) from fb_err
+
+        return self._model
+
+    async def transcribe(
+        self, protocol_id: uuid.UUID, audio_path: Path, task_id: uuid.UUID,
+        duration_sec: float | None = None,
+    ) -> TranscriptionStatus:
+        """Transcribe audio file with progress tracking.
+
+        US-005: Real Whisper transcription with:
+        - Progress updates (every segment processed)
+        - Error handling with status update
+        - DB persistence of utterances (TODO: integration with sessions)
+        """
+        status = TranscriptionStatus(
+            id=task_id,
+            protocol_id=protocol_id,
+            status="processing",
+            progress_percent=0,
+        )
+        self._tasks[task_id] = status
+
+        try:
+            # Step 1: Load model (slow on first call, ~30-120s for large-v3 CPU)
+            logger.info("transcribe_loading_model", task_id=str(task_id))
+            # US-058: Try active model via model_manager
+            from app.services.whisper_models import model_manager
+            active = model_manager.get_active_model()
+
+            # E070: Check that active model is ACTUALLY downloaded (not just selected)
+            if not model_manager.is_downloaded(active):
+                logger.warning(
+                    "active_model_not_downloaded",
+                    active=active,
+                    task_id=str(task_id),
+                )
+                from app.services.whisper_models import AVAILABLE_MODELS
+                # Pick first available downloaded model
+                fallback_used = None
+                for fallback in AVAILABLE_MODELS:
+                    if model_manager.is_downloaded(fallback):
+                        fallback_used = fallback
+                        break
+
+                if fallback_used:
+                    settings.whisper_model = fallback_used
+                    logger.info(
+                        "fallback_to_downloaded",
+                        from_model=active,
+                        to_model=fallback_used,
+                        task_id=str(task_id),
+                    )
+                else:
+                    # NO model downloaded - return clear error to user
+                    logger.error(
+                        "no_models_downloaded",
+                        task_id=str(task_id),
+                        active=active,
+                    )
+                    status.status = "failed"
+                    status.error_message = (
+                        f"Модель '{active}' не скачана и нет резервных. "
+                        f"Скачайте модель в Настройки → Транскрипция → Управление моделями"
+                    )
+                    status.progress_percent = 0
+                    # Persist failure to DB (E069)
+                    try:
+                        with SyncSessionLocal() as s:
+                            from sqlalchemy import update as _upd
+                            s.execute(
+                                _upd(_DBTask)
+                                .where(_DBTask.id == task_id)
+                                .values(status="failed", error_message=status.error_message, finished_at=_dt.utcnow())
+                            )
+                            s.commit()
+                    except Exception:
+                        pass
+                    return status  # ← exit early, don't try _load_model
+
+            # Log which model will be used
+            logger.info(
+                "transcribe_using_model",
+                model=settings.whisper_model,
+                task_id=str(task_id),
+            )
+
+            model = await asyncio.to_thread(self._load_model)
+            logger.info(
+                "transcribe_model_loaded",
+                task_id=str(task_id),
+                model_loaded=model is not None,
+            )
+
+            # Step 2: Validate audio file exists
+            if not audio_path.exists():
+                raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+            # Step 3: Run transcription
+            logger.info(
+                "transcribe_starting",
+                task_id=str(task_id),
+                audio_path=str(audio_path),
+                language=settings.whisper_language,
+                beam_size=settings.whisper_beam_size,
+            )
+
+            # E113: Heartbeat progress — обновляем каждые 2 сек
+            # чтобы UI не висел на 0% пока Whisper думает
+            stop_heartbeat = asyncio.Event()
+            transcribe_start_time = time.time()
+            # E113: Heartbeat progress — обновляем каждые 2 сек
+            # чтобы UI не висел на 0% пока Whisper думает
+            # E113-fix: heartbeat НЕ трогает БД (только message in-memory).
+            # Прогресс в БД обновится один раз в конце через _update_task_status_in_db.
+            stop_heartbeat = asyncio.Event()
+            transcribe_start_time = time.time()
+            # E113: Heartbeat + E121: persist_progress_loop
+            stop_heartbeat = asyncio.Event()
+            transcribe_start_time = time.time()
+            self._current_audio_duration = duration_sec or 0
+            # E125: estimated_duration_sec удалён (мёртвый код)
+
+            async def heartbeat_progress():
+                """Update progress message while transcription is running.
+
+                Whisper на CPU может думать 30-60 сек между сегментами.
+                Heartbeat гарантирует что UI видит живое сообщение.
+
+                E113-fix: НЕ обновляет progress_percent (это делает progress_cb).
+                Только обновляет message — чтобы UI знал, что процесс жив.
+                """
+                while not stop_heartbeat.is_set():
+                    elapsed = time.time() - transcribe_start_time
+                    # Show real elapsed in message — but DO NOT touch progress_percent
+                    status.message = f"Обработка аудио... {int(elapsed)}с"
+                    try:
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+
+            heartbeat_task = asyncio.create_task(heartbeat_progress())
+
+            # E121: persist_progress_loop — пишет status в БД каждые 2 сек
+            # из main event loop (НЕ из thread). Это безопаснее чем create_task в progress_cb.
+            async def persist_progress_loop():
+                """Sync status.progress_percent + status.message to DB every 2s."""
+                from app.services.task_status import update_task_status_in_db
+                while not stop_heartbeat.is_set():
+                    try:
+                        await update_task_status_in_db(
+                            task_id,
+                            "running",
+                            progress=float(status.progress_percent),
+                            message=status.message or "",
+                        )
+                        logger.debug(
+                            "progress_persisted_to_db",
+                            task_id=str(task_id),
+                            progress=status.progress_percent,
+                            message=status.message,
+                        )
+                    except Exception as db_err:
+                        logger.warning(
+                            "progress_persist_failed",
+                            task_id=str(task_id),
+                            error=str(db_err),
+                        )
+                    try:
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+
+            persist_task = asyncio.create_task(persist_progress_loop())
+
+            # US-066: Progress callback for UI - updates ONLY in-memory
+            # E121: НЕ пишем в БД из потока (asyncio.create_task падает).
+            # Вместо этого persist_progress_loop пишет каждые 2 сек из main loop.
+            def progress_cb(percent: int, current_seg: int, total_segs: int | None) -> None:
+                pct = min(100, percent)
+                status.progress_percent = pct
+                status.current_chunk = current_seg
+                if total_segs:
+                    status.total_chunks = total_segs
+                logger.debug(
+                    "transcribe_progress",
+                    task_id=str(task_id),
+                    percent=pct,
+                    segment=current_seg,
+                    total_segments=total_segs,
+                )
+                # Только in-memory update — БД persist делает отдельный loop
+
+            # Run eager-mode (consumes generator)
+            def _run_transcribe_eager():
+                """Eagerly consume transcribe() generator.
+
+                Returns:
+                    (segments_list, info)
+
+                Why eager: `transcribe()` returns a generator.
+                Calling it once returns a generator object, NOT a tuple.
+                To get info (duration, language), must consume first.
+                """
+                segments_generator, info = model.transcribe(
+                    str(audio_path),
+                    language=settings.whisper_language,
+                    beam_size=settings.whisper_beam_size,
+                    word_timestamps=False,  # faster
+                    # E118: Pass VAD parameters from settings
+                # Use only when VAD is enabled (default off to preserve all audio)
+                vad_filter=settings.whisper_vad_filter,
+                vad_parameters=(
+                    {
+                        "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+                        "speech_pad_ms": settings.vad_speech_pad_ms,
+                        "threshold": settings.vad_threshold,
+                    }
+                    if settings.whisper_vad_filter
+                    else None
+                ),
+                )
+
+                # Estimate total duration from info
+                total_duration = info.duration or 0.0
+
+                segments_list = []
+                for seg in segments_generator:
+                    segments_list.append(seg)
+                    # Calculate progress based on segment end time vs total
+                    if total_duration > 0:
+                        pct = min(100, int((seg.end / total_duration) * 100))
+                        progress_cb(pct, len(segments_list), None)
+
+                return segments_list, info
+
+            try:
+                segments_list, info = await asyncio.to_thread(_run_transcribe_eager)
+
+                status.progress_percent = 100
+                status.status = "completed"
+                status.wer_quality = 0.0  # TODO: calculate from segments
+            finally:
+                # E113-fix: heartbeat всегда останавливается (даже при исключении)
+                stop_heartbeat.set()
+                try:
+                    await asyncio.wait_for(heartbeat_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # E121: stop persist_progress_loop
+                try:
+                    await asyncio.wait_for(persist_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    persist_task.cancel()
+                    try:
+                        await persist_task
+                    except asyncio.CancelledError:
+                        pass
+
+            # E115: Persist completion to DB — with "Завершено" message (E125)
+            try:
+                from app.services.task_status import update_task_status_in_db
+                asyncio.create_task(update_task_status_in_db(
+                    task_id,
+                    "completed",
+                    progress=100.0,
+                    message="Завершено",
+                ))
+            except Exception as db_err:
+                logger.warning("completion_db_update_failed", error=str(db_err))
+
+            logger.info(
+                "transcription_completed",
+                task_id=str(task_id),
+                protocol_id=str(protocol_id),
+                duration=info.duration,
+                language=info.language,
+                language_probability=info.language_probability,
+                num_segments=len(segments_list),
+            )
+
+            # TODO (US-066): Insert utterances into DB
+            # await self._save_utterances(protocol_id, segments_list, info)
+
+        except Exception as e:
+            status.status = "failed"
+            status.error_message = str(e)[:1000]
+            logger.exception("transcription_failed", task_id=str(task_id), error=str(e))
+
+            # E115: async fire-and-forget
+            try:
+                from app.services.task_status import update_task_status_in_db
+                asyncio.create_task(update_task_status_in_db(
+                    task_id,
+                    "failed",
+                    error=status.error_message,
+                ))
+            except Exception as db_err:
+                logger.warning("failure_db_update_failed", error=str(db_err))
+            raise
+
+        return status
+
+    def get_status(self, task_id) -> TranscriptionStatus | None:
+        """Return in-memory status for a task, if it exists.
+
+        E120: This method was missing — frontend polling was falling
+        through to DB read which had no live progress.
+
+        E123: NO DB fallback here — sync function can't safely call
+        asyncio.run() from within a running event loop. Router handles
+        DB fallback itself (see get_transcription_progress).
+        """
+        import uuid as _uuid
+        if isinstance(task_id, str):
+            try:
+                task_id = _uuid.UUID(task_id)
+            except (ValueError, TypeError):
+                return None
+        return self._tasks.get(task_id)
+
+
+# Singleton instance
+transcription_service = TranscriptionService()
+
+
+/* ======================================================================
+ * FILE 2/4: code/hmp-backend/app/routers/transcribe.py
+ * ====================================================================== */
+
+"""Transcription endpoints (US-005, US-006 — API §4.4, §4.5).
+
+Workflow:
+  1. POST /transcribe/run — start transcription (BackgroundTasks + queue)
+  2. GET  /transcribe/status/{task_id} — poll progress
+  3. POST /transcribe/cancel/{task_id} — cancel running task
+  4. GET  /transcribe/health — model availability check
+
+Background work is delegated to ``app.services.transcription.transcription_service``
+(singleton, ADR-005). For very long audio the model may exceed RSS budget — the
+service is expected to chunk into 30-sec windows (NFR §QG-7).
+"""
+import asyncio
+import uuid
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.logging_config import get_logger
+from app.db.models import AudioFile, Protocol
+from app.db.session import get_db
+from app.schemas import TranscriptionRequest, TranscriptionStatus
+from app.services.transcription import transcription_service
+
+# E098: Registry moved to app.services.active_tasks (avoid circular imports)
+from app.services.active_tasks import (
+    _active_transcription_tasks,
+    register_active_task,
+    unregister_active_task,
+    is_task_alive,
+    get_active_task,
+)
+
+# Backward-compatible aliases (for code that still uses old names)
+_unregister_active_task = unregister_active_task
+_is_task_alive = is_task_alive
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _estimated_completion(duration_sec: int | None) -> datetime:
+    """Rough ETA — assumes 0.3× realtime for large-v3 on CUDA, falls back to 5 min."""
+    seconds = 300
+    if duration_sec:
+        # 0.3× realtime for large-v3 GPU
+        seconds = max(60, int(duration_sec * 0.3))
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+# ---------------------------------------------------------------------------
+# POST /transcribe/run
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/transcribe/run",
+    response_model=TranscriptionStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start a transcription job for a protocol",
+)
+async def run_transcription(
+    body: TranscriptionRequest,
+    background_tasks: BackgroundTasks,    # parameter kept for API
+    db: AsyncSession = Depends(get_db),
+) -> TranscriptionStatus:
+    """Queue a transcription job for ``protocol_id``.
+
+    Validates the protocol exists, has an audio file, and isn't already in
+    ``transcribing`` status, then schedules a background task that runs
+    ``transcription_service.transcribe``.
+    """
+    # --- Validate protocol ----------------------------------------------
+    proto_row = await db.execute(
+        select(Protocol).where(Protocol.id == body.protocol_id)
+    )
+    protocol: Protocol | None = proto_row.scalar_one_or_none()
+    if not protocol:
+        logger.warning("transcribe_protocol_not_found", protocol_id=str(body.protocol_id))
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Протокол {body.protocol_id} не найден",
+        )
+
+    # Check status - allow restart if stuck in transcribing
+    if protocol.status == "transcribing":
+        # Allow restart - reset status first
+        # E093: Use "idle" (canonical frontend state) instead of "loaded"
+        logger.info(
+            "transcribe_protocol_already_transcribing_force_restart",
+            protocol_id=str(protocol.id),
+        )
+        protocol.status = "idle"
+        protocol.transcribed = False
+        await db.commit()
+    if protocol.status == "diarizing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Сначала дождитесь окончания диаризации",
+        )
+
+    # Audio file is mandatory for transcription
+    if not protocol.audio_file_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="У протокола нет привязанного аудио-файла",
+        )
+
+    audio_row = await db.execute(
+        select(AudioFile).where(AudioFile.id == protocol.audio_file_id)
+    )
+    audio_file: AudioFile | None = audio_row.scalar_one_or_none()
+
+    if not audio_file:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Аудио-файл не найден на диске",
+        )
+
+    # --- Queue task ------------------------------------------------------
+    task_id = uuid.uuid4()
+    estimated = _estimated_completion(audio_file.duration_sec)
+
+    # E126: create_job удалён — transcription_service._tasks единственный источник правды
+    # (transcribe() создаст TranscriptionStatus автоматически)
+
+    # E124: transcribe() создаст правильный TranscriptionStatus в _tasks.
+    # Первые 1-2 сек фронт увидит "queued" из БД fallback.
+
+    # Persist task in DB for survival across backend restarts (US-066)
+    try:
+        from app.db.models import TranscriptionTask as _TTModel
+        from datetime import datetime as _dt
+        db_task = _TTModel(
+            id=task_id,
+            protocol_id=body.protocol_id,
+            status="queued",
+            progress=0.0,
+            current_chunk=0,
+            started_at=_dt.now(),
+        )
+        db.add(db_task)
+        await db.commit()
+        logger.info("transcription_task_persisted", task_id=str(task_id))
+    except Exception as e:
+        logger.warning("transcription_task_persist_failed", error=str(e))
+        await db.rollback()
+
+    logger.info(
+        "transcribe_queued",
+        task_id=str(task_id),
+        protocol_id=str(body.protocol_id),
+        model=body.model,
+        language=body.language,
+        beam_size=body.beam_size,
+        compute_type=body.compute_type,
+    )
+
+    # --- Schedule background work ---------------------------------------
+    audio_file_path_str = audio_file.file_path
+    audio_path = Path(audio_file_path_str)
+
+    async def _runner() -> None:
+        try:
+            # E113: Pass real audio duration to transcribe for accurate estimates
+            await transcription_service.transcribe(
+                protocol_id=body.protocol_id,
+                audio_path=audio_path,
+                task_id=task_id,
+                duration_sec=audio_file.duration_sec,
+            )
+            # E116: Await final status update (don't fire-and-forget for final state)
+            from app.services.task_status import update_task_status_in_db
+            await update_task_status_in_db(task_id, "completed", progress=100.0)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.exception(
+                "transcribe_runner_failed", task_id=str(task_id), error=str(exc)
+            )
+            # E116: Await failure update
+            try:
+                from app.services.task_status import update_task_status_in_db
+                await update_task_status_in_db(
+                    task_id, "failed", error=str(exc)[:500]
+                )
+            except Exception:
+                pass
+
+    # E086: Register task BEFORE starting — use setdefault for atomicity
+    async def _runner_with_cleanup() -> None:
+        try:
+            await _runner()
+        finally:
+            _unregister_active_task(str(task_id))
+
+    bg_task = asyncio.create_task(_runner_with_cleanup())
+    # E092: Check task.done() BEFORE registration
+    if not bg_task.done():
+        register_active_task(str(task_id), bg_task)
+        logger.info(
+            "transcription_task_registered",
+            task_id=str(task_id),
+            registry_size=len(_active_transcription_tasks),
+        )
+    else:
+        logger.warning(
+            "transcription_task_died_before_registration",
+            task_id=str(task_id),
+        )
+    # DO NOT use background_tasks.add_task — it would create a SECOND task
+
+    # Mark protocol as transcribing (best-effort; rolled back if commit fails)
+    protocol.status = "transcribing"
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("transcribe_status_update_failed", protocol_id=str(body.protocol_id))
+
+    return TranscriptionStatus(
+        task_id=task_id,
+        protocol_id=body.protocol_id,
+        status="queued",
+        progress_percent=0,
+        estimated_completion=estimated,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /transcribe/status/{task_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/transcribe/status/{task_id}",
+    response_model=TranscriptionStatus,
+    summary="Get transcription status",
+)
+async def get_transcription_status(task_id: uuid.UUID) -> TranscriptionStatus:
+    """Get current transcription status by task_id."""
+    status_obj = transcription_service.get_status(task_id)
+    if status_obj is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Задача {task_id} не найдена",
+        )
+    return status_obj
+
+
+@router.post(
+    "/transcribe/cancel/{task_id}",
+    summary="Cancel a running transcription",
+)
+async def cancel_transcription_endpoint(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Cancel a running transcription job.
+
+    E095-E097, E104: Cancel job syncs 4 places:
+    1. _jobs dict (legacy)
+    2. DB TranscriptionTask (SYNCHRONOUS, no pending queue)
+    3. asyncio.Task cancel
+    4. _pending_db_cancels cleanup
+    """
+    from app.services.transcription_progress import cancel_job, _pending_db_cancels
+
+    # Get the bg_task BEFORE cancel_job pops it from registry
+    bg_task_to_await = None
+    try:
+        bg_task_to_await = _active_transcription_tasks.get(task_id)
+    except Exception:
+        pass
+
+    if not cancel_job(task_id):
+        logger.warning("cancel_job_not_found", task_id=task_id)
+        return {"task_id": task_id, "status": "not_found", "message": "Задача не найдена"}
+
+    # E104: Apply cancel to DB SYNCHRONOUSLY (not via pending queue)
+    try:
+        from app.db.models import TranscriptionTask as _TT
+        try:
+            tid_uuid = uuid.UUID(task_id)
+        except (ValueError, TypeError) as uuid_err:
+            logger.warning("cancel_invalid_uuid", task_id=task_id, error=str(uuid_err))
+            tid_uuid = None
+        if tid_uuid is not None:
+            task = await db.get(_TT, tid_uuid)
+            if task and task.status in ("queued", "running", "starting"):
+                task.status = "cancelled"
+                task.error_message = "Отменено пользователем"
+                task.finished_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.info("cancel_applied_to_db", task_id=task_id)
+            else:
+                logger.info("cancel_db_already_terminal", task_id=task_id)
+    except Exception as e:
+        await db.rollback()
+        logger.warning("cancel_db_apply_failed", task_id=task_id, error=str(e))
+
+    # Clean up pending queue
+    _pending_db_cancels.discard(task_id)
+
+    # E097: Await cancelled task for graceful cleanup
+    if bg_task_to_await and not bg_task_to_await.done():
+        try:
+            from app.services.transcription_progress import _await_cancelled_task
+            await _await_cancelled_task(bg_task_to_await)
+        except Exception:
+            pass
+
+    return {"task_id": task_id, "status": "cancelled", "message": "Транскрипция отменена"}
+
+
+@router.get("/transcribe/health", summary="Transcription service health")
+async def transcribe_health() -> dict:
+    """Model availability check."""
+    return {
+        "status": "ok",
+        "active_tasks": len(transcription_service._tasks),  # noqa: SLF001
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /transcribe/progress/{task_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get("/transcribe/progress/{task_id}", summary="Get progress by task_id")
+async def get_transcription_progress(
+    task_id: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Get transcription progress by task_id."""
+    # ... uses transcription_service.get_status(task_id) which reads from _tasks
+    try:
+        status_obj = transcription_service.get_status(task_id)
+        if status_obj is not None:
+            return _serialize_task_status(task_id, status_obj)
+    except (ValueError, Exception):
+        pass
+
+    # Not found in _tasks — try DB
+    try:
+        from app.db.models import TranscriptionTask as _TT
+        task = await db.get(_TT, task_id)
+        if task:
+            return {
+                "id": str(task.id),
+                "task_id": str(task.id),
+                "protocol_id": str(task.protocol_id),
+                "status": task.status,
+                "progress": task.progress or 0,
+                "message": task.error_message or f"Транскрипция: {task.status}",
+                "segments_count": task.current_chunk or 0,
+            }
+    except Exception:
+        pass
+
+    # Not found
+    return {
+        "task_id": task_id,
+        "status": "unknown",
+        "progress": 0,
+        "message": "Задача не найдена или сервер был перезапущен",
+    }
+
+
+def _serialize_task_status(task_id, status_obj) -> dict:
+    """Serialize TranscriptionStatus to dict for JSON response."""
+    try:
+        return {
+            "id": str(status_obj.id),
+            "task_id": str(status_obj.id),
+            "protocol_id": str(status_obj.protocol_id),
+            "status": status_obj.status,
+            "progress": status_obj.progress_percent,
+            "message": status_obj.message or status_obj.error_message or f"Транскрипция: {status_obj.status}",
+            "segments_count": status_obj.current_chunk or 0,
+            "peak_rss_mb": status_obj.peak_rss_mb,
+            "estimated_completion": (
+                status_obj.estimated_completion.isoformat()
+                if status_obj.estimated_completion
+                else None
+            ),
+        }
+    except Exception:
+        return {
+            "task_id": str(task_id),
+            "status": "unknown",
+            "progress": 0,
+            "message": "Ошибка сериализации",
+        }
+
+
+# ---------------------------------------------------------------------------
+# GET /transcribe/progress-by-protocol/{protocol_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/transcribe/progress-by-protocol/{protocol_id}",
+    summary="Get transcription progress by protocol",
+)
+async def get_transcription_progress_by_protocol(
+    protocol_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Get current transcription progress for a protocol."""
+    try:
+        return await _get_progress_internal(protocol_id, db)
+    except Exception as e:
+        logger.error(
+            "transcription_progress_error",
+            protocol_id=str(protocol_id),
+            error=str(e),
+            exc_info=True,
+        )
+        return {
+            "id": None, "task_id": None,
+            "protocol_id": str(protocol_id),
+            "status": "error",
+            "progress": 0,
+            "message": f"Ошибка получения прогресса: {str(e)[:200]}",
+        }
+
+
+async def _get_progress_internal(
+    protocol_id: uuid.UUID, db: AsyncSession,
+) -> dict:
+    """Internal logic for transcription progress.
+
+    E082: Verify task is REALLY alive in active registry, not just DB status.
+    E096: Process pending DB cancels scheduled by sync cancel_job endpoint.
+    """
+    # E096/E101: Process pending DB cancels from sync endpoint
+    try:
+        from app.services.transcription_progress import (
+            get_pending_cancels,
+            _pending_db_cancels,
+        )
+        pending = get_pending_cancels()
+        if pending:
+            from app.db.models import TranscriptionTask as _TTCancel
+            try:
+                for tid_str in pending:
+                    try:
+                        tid_uuid = uuid.UUID(tid_str)
+                        task = await db.get(_TTCancel, tid_uuid)
+                        if task and task.status in ("queued", "running", "starting"):
+                            task.status = "cancelled"
+                            task.error_message = "Отменено пользователем"
+                            task.finished_at = datetime.now(timezone.utc)
+                            logger.info("pending_cancel_applied", task_id=tid_str)
+                    except (ValueError, TypeError) as uuid_err:
+                        logger.warning(
+                            "pending_cancel_invalid_uuid",
+                            task_id=tid_str,
+                            error=str(uuid_err),
+                        )
+                    except Exception as cancel_err:
+                        logger.warning(
+                            "pending_cancel_apply_failed",
+                            task_id=tid_str,
+                            error=str(cancel_err),
+                        )
+                await db.commit()
+            except Exception as commit_err:
+                await db.rollback()
+                _pending_db_cancels.update(pending)
+                logger.warning(
+                    "pending_cancel_batch_failed",
+                    error=str(commit_err),
+                    count=len(pending),
+                )
+    except Exception:
+        pass
+
+    try:
+        from app.db.models import TranscriptionTask as _TT
+    except ImportError:
+        return {
+            "id": None, "task_id": None,
+            "protocol_id": str(protocol_id),
+            "status": "unknown", "progress": 0,
+            "message": "TranscriptionTask модель недоступна",
+        }
+
+    from app.db.models import Protocol, TranscriptionTask
+
+    # Get protocol
+    proto_result = await db.execute(
+        select(Protocol).where(Protocol.id == protocol_id)
+    )
+    protocol = proto_result.scalar_one_or_none()
+
+    if not protocol:
+        return {
+            "id": None, "task_id": None,
+            "protocol_id": str(protocol_id),
+            "status": "unknown", "progress": 0,
+            "message": "Протокол не найден",
+        }
+
+    # Find active task (E108: limit 1)
+    task_result = await db.execute(
+        select(TranscriptionTask)
+        .where(TranscriptionTask.protocol_id == protocol_id)
+        .where(TranscriptionTask.status.in_(["queued", "running", "starting"]))
+        .order_by(TranscriptionTask.started_at.desc())
+        .limit(1)
+    )
+    task = task_result.scalar_one_or_none()
+
+    if task:
+        # E082: Verify task is alive in active registry
+        task_id_str = str(task.id)
+        is_alive_in_registry = _is_task_alive(task_id_str)
+
+        # E078/E079: Detect stale "running" tasks with safe datetime
+        is_stale = False
+        age_sec = 0
+        if task.started_at and task.status in ("queued", "running", "starting"):
+            started = task.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            age_sec = (datetime.now(timezone.utc) - started).total_seconds()
+
+            if not is_alive_in_registry and age_sec > 60:
+                is_stale = True
+                logger.warning(
+                    "task_not_in_registry",
+                    task_id=task_id_str,
+                    age_sec=int(age_sec),
+                    registry_size=len(_active_transcription_tasks),
+                )
+            # E122: 60 минут вместо 20 (CPU base на часовой записи — норма, не stale)
+            elif age_sec > 3600 and (task.progress or 0) < 0.1:
+                is_stale = True
+
+        if is_stale:
+            task.status = "failed"
+            task.error_message = (
+                f"Задача зависла (started {int(age_sec)}s назад, "
+                f"progress={task.progress})"
+            )
+            task.finished_at = datetime.now(timezone.utc)
+            try:
+                await db.commit()
+                logger.info(
+                    "stale_task_marked_failed",
+                    task_id=task_id_str,
+                    protocol_id=str(protocol_id),
+                    age_sec=int(age_sec),
+                )
+            except Exception as commit_err:
+                await db.rollback()
+                logger.warning(
+                    "stale_task_commit_failed",
+                    task_id=task_id_str,
+                    error=str(commit_err),
+                )
+
+        return {
+            "id": task_id_str,
+            "task_id": task_id_str,
+            "protocol_id": str(protocol_id),
+            "status": task.status,
+            "progress": task.progress or 0,
+            "message": task.error_message or f"Транскрипция: {task.status}",
+            "segments_count": task.current_chunk or 0,
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+        }
+
+    # No active task - reset stuck protocol if needed
+    if protocol.status == "transcribing":
+        try:
+            protocol.status = "idle"
+            await db.commit()
+            logger.info("stuck_protocol_reset_to_idle", protocol_id=str(protocol_id))
+        except Exception as reset_err:
+            await db.rollback()
+            logger.warning(
+                "stuck_protocol_reset_failed",
+                protocol_id=str(protocol_id), error=str(reset_err),
+            )
+        return {
+            "id": None, "task_id": None,
+            "protocol_id": str(protocol_id),
+            "status": "unknown", "progress": 0,
+            "message": "Предыдущая транскрипция была прервана (зависла). Можно запустить заново.",
+        }
+
+    # E090: Fallback — progress всегда 0 для неактивных
+    return {
+        "id": None, "task_id": None,
+        "protocol_id": str(protocol_id),
+        "status": protocol.status if protocol.status else "idle",
+        "progress": 0,
+        "message": f"Статус: {protocol.status or 'idle'}",
+    }
+
+
+# E124: _DummyStatus class удалён — transcribe() создаёт правильный TranscriptionStatus
+
+
+/* ======================================================================
+ * FILE 3/4: code/hmp-frontend/src/js/views/protocol.js
+ * ====================================================================== */
+
+// US-005 — транскрипция; US-022 — саммари; US-023 — action items
+// US-047: graceful fallback — основной протокол грузится обязательно,
+// вспомогательные данные могут быть пустыми без ошибки.
+
+/**
+ * ProtocolDetail view -- детальный view протокола.
+ *
+ * Включает: video player, transcript, screenshots, decisions, action items, tags, summary.
+ * Hotkeys: Space (play/pause), Esc (назад к списку), Ctrl+S (export DOCX).
+ */
+import { api, ApiError } from '../api/client.js';
+import { storage, STORES } from '../storage/indexeddb.js';
+import { toast } from '../utils/toast.js';
+import './components/video-player.js';
+import './components/tab-bar.js';
+import './components/modal.js';
+import './components/empty-state.js';
+
+// Don't await on top level - this can break module loading
+// Instead, open DB lazily on first call to storage
+console.log('protocol.js loaded');
+export async function renderProtocolDetail(rootEl, protocolId) {
+    rootEl.innerHTML = '<div class="loading"><div class="spinner"></div> Загрузка протокола...</div>';
+
+    let protocol, utterances, speakers, summary, tags, actionItems, screenshots, decisions;
+    // US-053: helper to safely cast any value to array
+    const safeArray = (x) => Array.isArray(x) ? x : [];
+
+    // US-047: Сначала пробуем загрузить с сервера
+    let serverSuccess = false;
+    try {
+        [protocol, utterances, speakers, summary, tags, actionItems, screenshots, decisions] = await Promise.all([
+            api.getProtocol(protocolId),
+            api.listUtterances(protocolId, { limit: 100 }).catch(() => []),
+            api.listSpeakers(protocolId).catch(() => []),
+            api.getSummary(protocolId).catch(() => null),
+            api.listTags(protocolId).catch(() => []),
+            api.listActionItems(protocolId).catch(() => []),
+            api.listScreenshots ? api.listScreenshots(protocolId).catch(() => []) : Promise.resolve([]),
+            api.listDecisions ? api.listDecisions(protocolId).catch(() => []) : Promise.resolve([]),
+        ]);
+
+        // Cache в IndexedDB (только если основной протокол загружен)
+        if (protocol && protocol.id) {
+            await storage.put(STORES.protocols, protocol);
+            const utterancesList = Array.isArray(utterances) ? utterances : [];
+            for (const u of utterancesList) await storage.put(STORES.utterances, u);
+            const speakersList = Array.isArray(speakers) ? speakers : [];
+            for (const s of speakersList) await storage.put(STORES.speakers, s);
+            serverSuccess = true;
+        }
+    } catch (err) {
+        // US-047: только если getProtocol упал — fallback на кэш
+        if (err instanceof ApiError && err.status === 404) {
+            toast.error('Протокол не найден');
+            window.location.hash = '#/';
+            return;
+        }
+        // Network error или другая ошибка — попробуем кэш
+        console.warn('Server fetch failed, trying cache:', err);
+    }
+
+    // US-047: Fallback на кэш только если server не вернул protocol
+    if (!serverSuccess || !protocol) {
+        const cached = await storage.get(STORES.protocols, protocolId);
+        if (cached) {
+            toast.info('Нет связи с сервером, показана кэшированная версия');
+            protocol = cached;
+            utterances = safeArray(await storage.getByIndex(STORES.utterances, 'by_protocol', protocolId));
+            speakers = safeArray(await storage.getByIndex(STORES.speakers, 'by_protocol', protocolId));
+            summary = null;
+            tags = safeArray(await storage.getByIndex(STORES.tags, 'by_protocol', protocolId));
+            actionItems = safeArray(await storage.getByIndex(STORES.action_items, 'by_protocol', protocolId));
+            screenshots = safeArray(await storage.getByIndex(STORES.screenshots, 'by_protocol', protocolId));
+            decisions = safeArray(await storage.getByIndex(STORES.decisions, 'by_protocol', protocolId));
+        } else {
+            toast.error('Не удалось загрузить протокол (нет сервера и нет кэша)');
+            window.location.hash = '#/';
+            return;
+        }
+    }
+
+    renderProtocolUI(
+        rootEl, protocol,
+        Array.isArray(utterances) ? utterances : [],
+        Array.isArray(speakers) ? speakers : [],
+        summary,
+        Array.isArray(tags) ? tags : [],
+        Array.isArray(actionItems) ? actionItems : [],
+        Array.isArray(screenshots) ? screenshots : [],
+        Array.isArray(decisions) ? decisions : []
+    );
+
+    // Check if transcription is already running for this protocol
+    checkExistingTranscription(protocol);
+
+    // Hotkeys
+    setupHotkeys(protocolId);
+}
+
+function renderProtocolUI(rootEl, protocol, utterances, speakers, summary, tags, actionItems, screenshots = [], decisions = []) {
+    const statusBadge = getStatusBadge(protocol.status);
+    const dateStr = new Date(protocol.date).toLocaleDateString('ru-RU', {
+        year: 'numeric', month: 'long', day: 'numeric',
+    });
+
+    rootEl.innerHTML = `
+        <div class="protocol-header">
+            <div>
+                <button class="btn" onclick="window.location.hash='#/'" aria-label="Назад к списку">← Назад</button>
+                <h1 style="display:inline-block; margin-left:12px;">${escapeHtml(protocol.title)}</h1>
+                <span class="badge badge-${statusBadge.type}" style="margin-left:8px;">${statusBadge.label}</span>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" id="btn-export"><i class="fa-regular fa-file-lines"></i> Экспорт DOCX</button>
+<button class="btn btn-danger" id="btn-delete"><i class="fa-regular fa-trash-can"></i> Удалить</button>
+                <button class="btn" id="btn-transcribe"><i class="fa-solid fa-play"></i> Транскрибировать</button>
+            </div>
+        </div>
+
+        <div class="protocol-meta">
+            <span><i class="fa-regular fa-calendar"></i> ${dateStr || 'Дата не указана'}</span>
+            ${protocol.location ? `<span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(protocol.location)}</span>` : ''}
+            ${protocol.chair ? `<span><i class="fa-regular fa-user"></i> ${escapeHtml(protocol.chair)}</span>` : ''}
+            ${protocol.duration_sec ? `<span><i class="fa-regular fa-clock"></i> ${formatDuration(protocol.duration_sec)}</span>` : ''}
+            ${protocol.wer_quality !== null ? `<span><i class="fa-solid fa-chart-column"></i> WER: ${protocol.wer_quality}%</span>` : ''}
+        </div>
+
+        ${protocol.audio_file ? `
+            <div class="file-info">
+                <div class="file-info-main" title="Кликните для просмотра полного пути">
+                    <span class="file-info-icon">${protocol.audio_file.source === 'url' ? '<i class="fa-solid fa-link"></i>' : '<i class="fa-solid fa-paperclip"></i>'}</span>
+                    <span class="file-info-name">${escapeHtml(protocol.audio_file.filename || 'Неизвестный файл')}</span>
+                    <span class="file-info-size">${formatFileSize(protocol.audio_file.size_bytes || 0)}</span>
+                    ${protocol.audio_file.source === 'url' && protocol.audio_file.source_url ?
+                        `<a href="${escapeHtml(protocol.audio_file.source_url)}" target="_blank" class="file-info-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}
+                </div>
+                ${protocol.audio_file.file_path ? `
+                    <div class="file-info-path" title="${escapeHtml(protocol.audio_file.file_path)}">
+                        <span class="file-info-path-label">Путь:</span>
+                        <span class="file-info-path-value">${escapeHtml(formatPath(protocol.audio_file.file_path))}</span>
+                        <button class="btn-copy-path" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Скопировать полный путь"><i class="fa-regular fa-clipboard"></i></button>
+                        <button class="btn-open-folder" data-audio-id="${protocol.audio_file.id}" data-path="${escapeHtml(protocol.audio_file.file_path)}" title="Открыть папку с файлом"><i class="fa-regular fa-folder-open"></i></button>
+                    </div>
+                ` : ''}
+            </div>
+        ` : ''}
+
+        <div id="video-container"></div>
+
+        <tab-bar id="protocol-tabs">
+            <button role="tab" id="tab-transcript" aria-controls="panel-transcript"><i class="fa-regular fa-note-sticky"></i> Транскрипция</button>
+            <button role="tab" id="tab-screenshots" aria-controls="panel-screenshots"><i class="fa-regular fa-image"></i>️ Скриншоты</button>
+            <button role="tab" id="tab-decisions" aria-controls="panel-decisions"><i class="fa-solid fa-check"></i> Решения</button>
+            <button role="tab" id="tab-tasks" aria-controls="panel-tasks"><i class="fa-regular fa-clipboard"></i> Задачи</button>
+            <button role="tab" id="tab-summary" aria-controls="panel-summary"><i class="fa-regular fa-file-lines"></i> Саммари</button>
+            <button role="tab" id="tab-speakers" aria-controls="panel-speakers"><i class="fa-solid fa-microphone"></i> Ораторы</button>
+        </tab-bar>
+
+        <div id="panels">
+            <div role="tabpanel" id="panel-transcript" aria-labelledby="tab-transcript" hidden></div>
+            <div role="tabpanel" id="panel-screenshots" aria-labelledby="tab-screenshots" hidden></div>
+            <div role="tabpanel" id="panel-decisions" aria-labelledby="tab-decisions" hidden></div>
+            <div role="tabpanel" id="panel-tasks" aria-labelledby="panel-tasks" hidden></div>
+            <div role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" hidden></div>
+            <div role="tabpanel" id="panel-speakers" aria-labelledby="tab-speakers" hidden></div>
+        </div>
+    `;
+
+    // Video player
+    // Safe array helpers
+    const safeArray = (arr) => Array.isArray(arr) ? arr : [];
+    const safeFilter = (arr, predicate) => safeArray(arr).filter(predicate);
+
+    // Video player
+    if (protocol.audio_file) {
+        const player = document.createElement('video-player');
+        const audioUrl = `${window.__BACKEND_URL__ || "http://127.0.0.1:8000"}/api/v1/hmp/media/protocols/${protocol.id}/source.${protocol.audio_file.extension}`;
+        player.style.width = '100%';
+        rootEl.querySelector('#video-container').appendChild(player);
+        // Загружаем видео после монтирования
+        requestAnimationFrame(() => player.setSource(audioUrl));
+    }
+
+    // Инициализация табов (нужно вызвать addTab для TabBar компонента)
+    const tabBar = rootEl.querySelector('tab-bar');
+    tabBar.tabs = [
+        { id: 'transcript', label: '<i class="fa-regular fa-note-sticky"></i> Транскрипция', badge: utterances.length },
+        { id: 'screenshots', label: '<i class="fa-regular fa-image"></i> Скриншоты', badge: screenshots.length },
+        { id: 'decisions', label: '<i class="fa-solid fa-check"></i> Решения', badge: decisions.length },
+        { id: 'tasks', label: '<i class="fa-regular fa-clipboard"></i> Задачи', badge: safeFilter(actionItems, a => a.status === 'open').length },
+        { id: 'summary', label: '<i class="fa-regular fa-file-lines"></i> Саммари', badge: summary ? 1 : 0 },
+        { id: 'speakers', label: '<i class="fa-solid fa-microphone"></i> Ораторы', badge: speakers.length },
+    ];
+    tabBar.render();
+    tabBar.attachEvents();
+    tabBar.activateTab('transcript', true);
+
+    tabBar.onChange(tabId => switchTab(tabId, protocol, utterances, speakers, summary, tags, actionItems));
+
+    // Рендерим все панели (но показываем только активную)
+    renderTranscriptTab(rootEl, protocol, utterances, speakers);
+    renderScreenshotsTab(rootEl, protocol, []);
+    renderDecisionsTab(rootEl, protocol);
+    renderTasksTab(rootEl, protocol, actionItems);
+    renderSummaryTab(rootEl, protocol, summary);
+    renderSpeakersTab(rootEl, protocol, speakers, utterances);
+
+    // Action handlers
+    document.getElementById('btn-export').addEventListener('click', () => startExport(protocol));
+
+    // Copy path buttons
+    rootEl.querySelectorAll('.btn-copy-path').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const path = btn.dataset.path;
+            try {
+                await navigator.clipboard.writeText(path);
+                toast.success('Путь скопирован в буфер обмена');
+            } catch (err) {
+                toast.warning('Не удалось скопировать: ' + err.message);
+            }
+        });
+    });
+
+    // Open folder buttons (US-069)
+    rootEl.querySelectorAll('.btn-open-folder').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const audioFileId = btn.dataset.audioId;
+            const path = btn.dataset.path;
+            
+            // Copy path to clipboard as fallback
+            try {
+                await navigator.clipboard.writeText(path);
+            } catch (err) {
+                // ignore
+            }
+            
+            try {
+                const result = await api.openAudioFolder(audioFileId);
+                
+                if (result.error) {
+                    toast.error('Ошибка открытия: ' + result.error);
+                } else if (!result.file_exists && !result.folder_exists) {
+                    toast.warning('Файл/папка не найдены: ' + path);
+                    toast.info('Путь скопирован в буфер');
+                } else {
+                    const osLabel = {windows: 'Проводник', darwin: 'Finder', linux: 'файловый менеджер'}[result.os] || 'файл-менеджер';
+                    toast.success(`${osLabel} открыт: ${result.folder}`);
+                    toast.info('Путь также скопирован в буфер');
+                }
+            } catch (err) {
+                toast.error('Ошибка: ' + err.message);
+                toast.info('Путь скопирован в буфер. Вставьте в проводник.');
+            }
+        });
+    });
+document.getElementById('btn-delete')?.addEventListener('click', () => confirmDeleteProtocol(protocol));
+    document.getElementById('btn-transcribe').addEventListener('click', () => startTranscribe(protocol));
+}
+
+function switchTab(tabId, protocol, utterances, speakers, summary, tags, actionItems) {
+    const panels = document.querySelectorAll('[role="tabpanel"]');
+    panels.forEach(p => p.hidden = true);
+    const active = document.getElementById(`panel-${tabId}`);
+    if (active) active.hidden = false;
+}
+
+// ────────────────────────────────────────────────────────────
+// Tab renderers (to be expanded in next iteration)
+// ────────────────────────────────────────────────────────────
+
+function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
+    const panel = rootEl.querySelector('#panel-transcript');
+    if (!utterances.length) {
+        panel.innerHTML = `<empty-state icon="<i class="fa-regular fa-note-sticky"></i>" title="Нет транскрипции" description="Запустите транскрипцию чтобы получить распознанный текст." action-label="<i class="fa-solid fa-play"></i> Транскрибировать"></empty-state>`;
+        return;
+    }
+    panel.innerHTML = `
+        <div class="transcript-toolbar">
+            <button class="btn" id="btn-cleanup-ai">✨ Исправить через AI</button>
+            <span class="text-muted">${utterances.length} реплик · ${speakers.length} ораторов</span>
+        </div>
+        <div class="transcript-list">
+            ${utterances.map(u => renderUtteranceItem(u, speakers)).join('')}
+        </div>
+    `;
+    // Двойной клик → редактирование (заглушка)
+    panel.querySelectorAll('.utterance-item').forEach(item => {
+        item.addEventListener('dblclick', () => {
+            toast.info('Редактирование реплик -- следующая итерация');
+        });
+    });
+
+    // Обработчик кнопки "Транскрибировать" в empty-state
+    const emptyState = panel.querySelector('empty-state');
+    if (emptyState) {
+        emptyState.addEventListener('action', () => startTranscribe(protocol));
+    }
+}
+
+function renderUtteranceItem(u, speakers) {
+    const speaker = speakers.find(s => s.id === u.speaker_id);
+    const speakerName = speaker?.display_name || u.speaker_label || '--';
+    const speakerColor = speaker?.color || '#888';
+    const startTime = formatTimestamp(u.start_sec);
+    const conf = u.confidence ?? 1.0;
+    const confClass = conf < 0.4 ? 'danger' : conf < 0.7 ? 'warning' : 'success';
+    const lowConfIcon = u.low_confidence ? ' <span title="Низкая уверенность" style="color:#f59e0b;">[?]</span>' : '';
+    return `
+        <div class="utterance-item" data-id="${u.id}" tabindex="0">
+            <div class="utterance-meta">
+                <span class="speaker-badge" style="background:${speakerColor};">${escapeHtml(speakerName)}</span>
+                <span class="timestamp" data-time="${u.start_sec}">${startTime}</span>
+                <span class="confidence-bar">
+                    <span class="conf-fill conf-${confClass}" style="width:${conf * 100}%"></span>
+                </span>
+            </div>
+            <div class="utterance-text">${escapeHtml(u.text)}${lowConfIcon}</div>
+        </div>
+    `;
+}
+
+function renderScreenshotsTab(rootEl, protocol, screenshots) {
+    const panel = rootEl.querySelector('#panel-screenshots');
+    panel.innerHTML = `
+        <div class="toolbar" style="margin-bottom:16px;">
+            <input type="file" id="screenshot-input" accept=".png,.jpg,.jpeg" style="display:none">
+            <button class="btn btn-primary" id="btn-upload-screenshot">
+                <i class="fa-solid fa-cloud-arrow-up"></i> Загрузить скриншот
+            </button>
+            <span class="text-muted" style="margin-left:8px;">PNG, JPG до 5 МБ</span>
+        </div>
+        <div id="screenshots-grid">
+            ${screenshots.length === 0 ? `
+                <empty-state icon="<i class="fa-regular fa-image"></i>" title="Нет скриншотов" description="Загрузите PNG/JPG или включите Live Mode (Яндекс Телемост)."></empty-state>
+            ` : `
+                <div class="screenshots-grid">${screenshots.map(s => `
+                    <div class="screenshot-card">
+                        <img src="/api/v1/hmp/screenshots/${s.id}/image" alt="${s.caption || ''}" loading="lazy">
+                        <time>${formatTimestamp(s.timestamp_sec)}</time>
+                        ${s.caption ? `<div class="caption">${escapeHtml(s.caption)}</div>` : ''}
+                    </div>
+                `).join('')}</div>
+            `}
+        </div>
+    `;
+
+    // Handler для загрузки скриншота
+    const fileInput = panel.querySelector('#screenshot-input');
+    const btnUpload = panel.querySelector('#btn-upload-screenshot');
+    if (btnUpload && fileInput) {
+        btnUpload.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            try {
+                toast.info('Загрузка скриншота...');
+                const screenshot = await api.uploadScreenshot(file, protocol.id, {
+                    timestamp_sec: protocol.video_player?.currentTime || 0,
+                    caption: file.name,
+                });
+                toast.success(`Скриншот загружен: ${screenshot.id}`);
+                // Reload screenshots list
+                const updated = await api.listScreenshots(protocol.id);
+                renderScreenshotsTab(rootEl, protocol, updated);
+            } catch (err) {
+                toast.error('Ошибка загрузки: ' + err.message);
+            } finally {
+                fileInput.value = ''; // reset
+            }
+        });
+    }
+}
+
+function renderDecisionsTab(rootEl, protocol) {
+    const panel = rootEl.querySelector('#panel-decisions');
+    panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-check"></i>" title="Список решений пуст" description="Решения можно добавлять после транскрипции." action-label="Добавить решение"></empty-state>`;
+}
+
+function renderTasksTab(rootEl, protocol, actionItems) {
+    const panel = rootEl.querySelector('#panel-tasks');
+    const items = Array.isArray(actionItems) ? actionItems : [];
+    if (!items.length) {
+        panel.innerHTML = `<empty-state icon="<i class="fa-regular fa-clipboard"></i>" title="Нет задач" description="Action items появятся после AI-извлечения или ручного добавления." action-label="+ Добавить задачу"></empty-state>`;
+        return;
+    }
+    panel.innerHTML = `<div class="tasks-list">${items.map(t => `
+        <div class="task-card">
+            <input type="checkbox" ${t.status === 'done' ? 'checked' : ''} data-id="${t.id}">
+            <div class="task-content">
+                <div class="task-title">${escapeHtml(t.task)}</div>
+                <div class="task-meta">
+                    ${t.owner ? `<i class="fa-regular fa-user"></i> ${escapeHtml(t.owner)}` : ''}
+                    ${t.deadline ? `<i class="fa-regular fa-calendar"></i> ${t.deadline}` : ''}
+                    <span class="badge badge-${t.status === 'done' ? 'success' : 'warning'}">${t.status}</span>
+                </div>
+            </div>
+        </div>
+    `).join('')}</div>`;
+}
+
+function renderSummaryTab(rootEl, protocol, summary) {
+    const panel = rootEl.querySelector('#panel-summary');
+    if (!summary) {
+        panel.innerHTML = `
+            <div style="text-align:center; padding:24px;">
+                <p class="text-muted">Саммари ещё не сгенерировано</p>
+                <button class="btn btn-primary" id="btn-summarize">✨ Создать саммари</button>
+            </div>
+        `;
+        const btn = panel.querySelector('#btn-summarize');
+        if (btn) btn.addEventListener('click', () => createSummary(protocol));
+        return;
+    }
+    panel.innerHTML = `
+        <div class="summary-header">
+            <span class="text-muted">Провайдер: ${summary.provider} · ${summary.tokens_used || '?'} токенов · ${new Date(summary.generated_at).toLocaleString('ru-RU')}</span>
+            <button class="btn" id="btn-regenerate">🔄 Регенерировать</button>
+        </div>
+        <div class="summary-content">${renderMarkdown(summary.text)}</div>
+    `;
+    panel.querySelector('#btn-regenerate')?.addEventListener('click', () => createSummary(protocol, true));
+}
+
+function renderSpeakersTab(rootEl, protocol, speakers, utterances) {
+    const panel = rootEl.querySelector('#panel-speakers');
+    if (!speakers.length) {
+        panel.innerHTML = `<empty-state icon="<i class="fa-solid fa-microphone"></i>" title="Ораторы не найдены" description="Запустите диаризацию чтобы определить ораторов."></empty-state>`;
+        return;
+    }
+    panel.innerHTML = `<div class="speakers-grid">${speakers.map(s => `
+        <div class="speaker-card" style="border-left: 4px solid ${s.color || '#888'};">
+            <div class="speaker-name">${escapeHtml(s.display_name || s.speaker_label)}</div>
+            <div class="speaker-stats">${utterances.filter(u => u.speaker_id === s.id).length} реплик</div>
+            ${s.is_user ? '<span class="badge badge-success">Вы</span>' : ''}
+        </div>
+    `).join('')}</div>`;
+}
+
+// ────────────────────────────────────────────────────────────
+// Actions
+// ────────────────────────────────────────────────────────────
+
+async function startExport(protocol) {
+    try {
+        toast.info('Запуск экспорта DOCX...');
+        const task = await api.startExport({
+            protocol_id: protocol.id,
+            include_timestamps: true,
+            include_screenshots: true,
+            include_video_links: true,
+            group_by_speaker: true,
+            mark_doubtful: true,
+            include_summary: true,
+            include_decisions: true,
+            include_action_items: true,
+        });
+        toast.success(`Экспорт запущен (task ${task.task_id.slice(0, 8)})`);
+        // Polling
+        const interval = setInterval(async () => {
+            try {
+                const status = await api.getExportStatus(task.task_id);
+                if (status.status === 'completed') {
+                    clearInterval(interval);
+                    toast.success('Экспорт готов!');
+                    // Auto-download
+                    const blob = await api.downloadExport(task.task_id);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `protocol_${protocol.id}.docx`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } else if (status.status === 'failed') {
+                    clearInterval(interval);
+                    toast.error(`Ошибка экспорта: ${status.error_message}`);
+                }
+            } catch (err) {
+                clearInterval(interval);
+                toast.error(`Ошибка: ${err.message}`);
+            }
+        }, 2000);
+    } catch (err) {
+        toast.error(`Не удалось запустить экспорт: ${err.message}`);
+    }
+}
+
+// Global state for transcription tracking
+let transcriptionPollInterval = null;
+let currentTranscriptionTaskId = null;
+let _startTranscribeLock = false;  // E109: lock to prevent double-call
+
+async function checkExistingTranscription(protocol) {
+    // E077: Reset state BEFORE checking
+    currentTranscriptionTaskId = null;
+    if (transcriptionPollInterval) {
+        clearInterval(transcriptionPollInterval);
+        transcriptionPollInterval = null;
+    }
+
+    try {
+        const progress = await api.getTranscriptionProgressByProtocol(protocol.id);
+        if (progress.status === 'running' || progress.status === 'queued' || progress.status === 'starting') {
+            // E077: Try both id and task_id
+            const taskId = progress.id || progress.task_id;
+            if (!taskId) {
+                // Running status but no task_id — stale state
+                console.warn('Backend returned running status but no task_id');
+                updateTranscribeButton(protocol, 'idle');
+                hideProgressBar();
+                return false;
+            }
+
+            // E078/E080/E083: Verify task with timeout + abort controller
+            // AbortController cancels the underlying HTTP request on timeout
+            try {
+                const controller = new AbortController();
+                const verifyPromise = api.getTranscriptionProgress(taskId, { signal: controller.signal });
+                const timeoutId = setTimeout(() => {
+                    controller.abort();
+                }, 3000);
+                try {
+                    await verifyPromise;
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            } catch (verifyErr) {
+                const vErrMsg = (verifyErr.message || '').toLowerCase();
+                if (verifyErr.status === 404 || vErrMsg.includes('не найдена')) {
+                    // Stale task — reset to idle
+                    console.warn('Task is stale (not in registry):', taskId);
+                    updateTranscribeButton(protocol, 'idle');
+                    hideProgressBar();
+                    return false;
+                }
+                if (verifyErr.name === 'AbortError' || vErrMsg.includes('aborted') || vErrMsg.includes('timeout')) {
+                    // E083: Timeout — don't block UI on slow backend
+                    console.warn('Verify aborted/timeout, continuing...');
+                } else {
+                    // Other errors — log but continue
+                    console.warn('Verify task failed (continuing):', verifyErr);
+                }
+            }
+
+            currentTranscriptionTaskId = taskId;
+            updateProgressBar(progress);
+            updateTranscribeButton(protocol, 'running');
+            startProgressPolling(protocol, taskId);
+            return true;
+        } else if (progress.status === 'unknown' || progress.status === 'transcribing') {
+            // E078: Stuck/unknown state — allow user to restart
+            updateTranscribeButton(protocol, 'idle');
+            // E089: dedupe warning per protocol (not global)
+            const warnedKey = `__transcriptionStaleWarned_${protocol.id}`;
+            if (!window[warnedKey]) {
+                toast.warning('Предыдущая транскрипция была прервана. Можно запустить заново.');
+                window[warnedKey] = true;
+                setTimeout(() => { window[warnedKey] = false; }, 60000);
+            }
+            hideProgressBar();
+            return false;
+        } else {
+            // E077: Other statuses (completed, failed, cancelled) → reset to idle
+            updateTranscribeButton(protocol, 'idle');
+            hideProgressBar();
+            return false;
+        }
+    } catch (e) {
+        console.warn('Failed to check transcription status:', e);
+    }
+    // Default: idle
+    updateTranscribeButton(protocol, 'idle');
+    hideProgressBar();
+    return false;
+}
+
+async function startTranscribe(protocol) {
+    // E109: Prevent double-click / double-call (3 layers of protection)
+    if (transcriptionPollInterval || currentTranscriptionTaskId) {
+        toast.warning('Транскрипция уже запущена');
+        return;
+    }
+    if (_startTranscribeLock) {
+        console.warn('startTranscribe already in flight');
+        return;
+    }
+    _startTranscribeLock = true;
+    try {
+        toast.info('Запуск транскрипции...');
+        const response = await api.startTranscription({
+            protocol_id: protocol.id,
+            model: 'large-v3',
+            language: 'ru',
+        });
+
+        // Get task_id from response
+        const taskId = response.id || response.task_id;
+        if (!taskId) {
+            toast.error('Не получен ID задачи');
+            return;
+        }
+
+        currentTranscriptionTaskId = taskId;
+        toast.success('Транскрипция запущена');
+
+        // Start polling progress
+        startProgressPolling(protocol, taskId);
+
+        // Update button to "Stop"
+        updateTranscribeButton(protocol, 'running');
+    } catch (err) {
+        if (err.status === 409) {
+            toast.warning('Транскрипция уже идёт');
+        } else {
+            toast.error(`Ошибка: ${err.message}`);
+        }
+    } finally {
+        // E109: Release lock
+        _startTranscribeLock = false;
+    }
+}
+
+function startProgressPolling(protocol, taskId) {
+    // Clear existing interval
+    if (transcriptionPollInterval) {
+        clearInterval(transcriptionPollInterval);
+    }
+
+    // Poll every 2 seconds
+    transcriptionPollInterval = setInterval(async () => {
+        try {
+            const progress = await api.getTranscriptionProgress(taskId);
+
+            // Update UI with progress
+            updateProgressBar(progress);
+
+            // Check if done
+            if (['completed', 'failed', 'cancelled', 'finished', 'done'].includes(progress.status?.toLowerCase())) {
+                clearInterval(transcriptionPollInterval);
+                transcriptionPollInterval = null;
+                currentTranscriptionTaskId = null;
+                updateTranscribeButton(protocol, 'idle');
+                hideProgressBar();
+
+                if (progress.status === 'completed' || progress.status === 'finished' || progress.status === 'done') {
+                    toast.success('Транскрипция завершена! Обновите страницу.');
+                } else if (progress.status === 'failed') {
+                    toast.error(`Транскрипция провалилась: ${progress.message || ''}`);
+                } else if (progress.status === 'cancelled') {
+                    toast.warning('Транскрипция отменена');
+                }
+            }
+        } catch (e) {
+            console.warn('Progress poll error:', e);
+        }
+    }, 2000);
+}
+
+function updateProgressBar(progress) {
+    // E113: Show human-readable message + percent
+    let bar = document.getElementById('transcribe-progress');
+    const pct = progress.progress_percent !== undefined ? progress.progress_percent : (progress.progress || 0);
+    const msg = progress.message || (pct < 5 ? 'Инициализация...' : pct < 95 ? 'Обработка аудио...' : 'Финализация...');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'transcribe-progress';
+        bar.className = 'transcribe-progress';
+        bar.innerHTML = `
+            <div class="progress-info">
+                <span class="progress-status">${msg}</span>
+                <span class="progress-percent">${pct}%</span>
+            </div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" style="width: ${pct}%"></div>
+            </div>
+        `;
+        document.body.appendChild(bar);
+    }
+    bar.querySelector('.progress-status').textContent = msg;
+    bar.querySelector('.progress-percent').textContent = `${pct}%`;
+    bar.querySelector('.progress-bar-fill').style.width = `${pct}%`;
+}
+
+function hideProgressBar() {
+    const bar = document.getElementById('transcribe-progress');
+    if (bar) bar.remove();
+}
+
+function updateTranscribeButton(protocol, state) {
+    const btn = document.getElementById('btn-transcribe');
+    if (!btn) return;
+
+    const bottomBtn = document.getElementById('btn-transcribe-bottom');
+
+    if (state === 'running') {
+        btn.innerHTML = '<i class="fa-solid fa-stop"></i> Остановить транскрипцию';
+        btn.classList.add('btn-danger');
+        btn.classList.remove('btn-primary');
+        btn.onclick = () => confirmCancelTranscribe(protocol);
+
+        if (bottomBtn) {
+            bottomBtn.innerHTML = '<i class="fa-solid fa-stop"></i> Отмен...';
+            bottomBtn.disabled = true;
+        }
+    } else {
+        btn.innerHTML = '<i class="fa-solid fa-play"></i> Транскрибировать';
+        btn.classList.add('btn-primary');
+        btn.classList.remove('btn-danger');
+        btn.onclick = () => startTranscribe(protocol);
+
+        if (bottomBtn) {
+            bottomBtn.innerHTML = '<i class="fa-solid fa-play"></i> Транскрибировать';
+            bottomBtn.disabled = false;
+        }
+    }
+}
+
+async function confirmCancelTranscribe(protocol) {
+    // E077: Use try/finally to ALWAYS reset state
+    const taskIdToCancel = currentTranscriptionTaskId;
+
+    if (!taskIdToCancel) {
+        toast.warning('Нет активной задачи');
+        updateTranscribeButton(protocol, 'idle');
+        hideProgressBar();
+        return;
+    }
+
+    if (!confirm('Прервать транскрипцию? Прогресс будет потерян.')) {
+        return;
+    }
+
+    try {
+        await api.cancelTranscription(taskIdToCancel);
+        toast.warning('Транскрипция прервана');
+    } catch (err) {
+        // E077: Special handling for "task not found" - it's stale state
+        const errMsg = (err.message || '').toLowerCase();
+        if (errMsg.includes('не найдена') || errMsg.includes('not found') || err.status === 404) {
+            toast.warning('Задача уже завершена или не существует');
+        } else {
+            toast.error(`Не удалось отменить: ${err.message}`);
+        }
+    } finally {
+        // E077: ALWAYS reset state in finally block
+        if (transcriptionPollInterval) {
+            clearInterval(transcriptionPollInterval);
+            transcriptionPollInterval = null;
+        }
+        currentTranscriptionTaskId = null;
+        updateTranscribeButton(protocol, 'idle');
+        hideProgressBar();
+    }
+}
+
+async function createSummary(protocol, regenerate = false) {
+    try {
+        toast.info(regenerate ? 'Регенерация саммари...' : 'Создание саммари...');
+        const summary = await api.summarize({
+            protocol_id: protocol.id,
+            provider: 'hermes',
+            style: 'structured',
+            max_words: 500,
+        });
+        toast.success('Саммари готово');
+        // Reload tab
+        renderSummaryTab(document, protocol, summary);
+    } catch (err) {
+        toast.error(`Ошибка: ${err.message}`);
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// Helpers
+// ────────────────────────────────────────────────────────────
+
+function setupHotkeys(protocolId) {
+    const handler = (e) => {
+        // Не перехватываем если фокус в input/textarea (кроме Space)
+        if (e.key === ' ' && ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
+            return;
+        }
+        if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+
+        if (e.key === 'Escape') {
+            window.location.hash = '#/';
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            // Trigger export
+            document.getElementById('btn-export')?.click();
+        }
+    };
+    document.addEventListener('keydown', handler);
+    // Cleanup when navigating away
+    window.addEventListener('hashchange', () => {
+        document.removeEventListener('keydown', handler);
+    }, { once: true });
+}
+
+function formatTimestamp(seconds) {
+    if (!seconds) return '0:00';
+    return formatTime(seconds);
+}
+
+function formatTime(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return '0:00';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h} ч ${m} мин`;
+    return `${m} мин`;
+}
+
+function formatFileSize(bytes) {
+    if (!bytes || bytes === 0) return '--';
+    const units = ['Б', 'КБ', 'МБ', 'ГБ'];
+    let size = bytes;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit++;
+    }
+    return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatPath(fullPath) {
+    if (!fullPath) return '';
+    const sep = fullPath.includes('/') ? '/' : '\\';
+    const parts = fullPath.split(sep).filter(p => p);
+    if (parts.length <= 3) return fullPath;
+    const last = parts.slice(-2).join(sep);
+    return '...' + sep + last;
+}
+
+function getStatusBadge(status) {
+    const map = {
+        ready: { type: 'success', label: 'Готов' },
+        transcribed: { type: 'success', label: 'Готов' },
+        loaded: { type: 'warning', label: 'Загружен' },
+        transcribing: { type: 'warning', label: 'Транскрибируется' },
+        diarizing: { type: 'warning', label: 'Диаризация' },
+        failed: { type: 'danger', label: 'Ошибка' },
+    };
+    return map[status] || { type: 'warning', label: status };
+}
+
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = String(s);
+    return div.innerHTML;
+}
+
+function renderMarkdown(text) {
+    // Простой Markdown renderer (paragraphs, **bold**, *italic*, # headers)
+    if (!text) return '';
+    return escapeHtml(text)
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^# (.+)$/gm, '<h2>$1</h2>')
+        .replace(/\n\n/g, '</p><p>')
+        .replace(/^/, '<p>')
+        .replace(/$/, '</p>');
+}
+
+
+
+async function confirmDeleteProtocol(protocol) {
+    // Step 1: Show clear warning about what will be deleted
+    const fileCount = protocol.audio_file ? 1 : 0;
+    const warning = `Удалить протокол "${protocol.title || 'Без названия'}"?\n\n` +
+        `Будет удалено ВСЁ:\n` +
+        `  • Сам протокол\n` +
+        `  • Все реплики и таймкоды\n` +
+        `  • Саммари и решения\n` +
+        `  • Скриншоты\n` +
+        `  • Файл видео\n\n` +
+        `Это действие нельзя отменить!`;
+
+    if (!confirm(warning)) {
+        return;
+    }
+
+    // Step 2: Hard delete via backend
+    try {
+        const result = await api.deleteProtocolPermanent(protocol.id);
+        const counts = result.deleted_counts || {};
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        toast.success(`Протокол удалён. Удалено записей: ${total}`);
+        setTimeout(() => {
+            window.location.hash = '#/';
+        }, 1000);
+    } catch (err) {
+        toast.error('Ошибка удаления: ' + err.message);
+    }
+}
+
+
+/* ======================================================================
+ * FILE 4/4: code/hmp-backend/app/services/transcription_progress.py
+ * ====================================================================== */
+
+"""Transcription progress — only legacy cancel logic remains.
+
+E126: _jobs dict, create_job, update_job, get_job — мёртвый код.
+Единственный источник правды — transcription_service._tasks + БД.
+Cancel logic остаётся потому что router вызывает его синхронно.
+"""
+import asyncio
+import logging
+from typing import Dict, Optional
+
+from app.services.active_tasks import _active_transcription_tasks
+
+logger = logging.getLogger(__name__)
+
+# E126: _jobs dict оставлен для cancel_job (legacy API совместимости)
+_jobs: Dict[str, dict] = {}
+
+
+def create_job(protocol_id: str, task_id: str) -> dict:
+    """E126: DEPRECATED — оставлено для обратной совместимости.
+
+    Реальный статус хранится в transcription_service._tasks.
+    """
+    job = {
+        "task_id": task_id,
+        "protocol_id": protocol_id,
+        "status": "starting",
+        "progress": 0,
+        "message": "Инициализация...",
+        "segments_count": 0,
+    }
+    _jobs[task_id] = job
+    return job
+
+
+def update_job(task_id: str, status: str = None, progress: int = None,
+               message: str = None, segments_count: int = None):
+    """E126: DEPRECATED — no-op."""
+    pass
+
+
+def get_job(task_id: str) -> Optional[dict]:
+    """E126: DEPRECATED — returns stub."""
+    return _jobs.get(task_id)
+
+
+# E096: Pending DB cancels — async endpoint processes these
+_pending_db_cancels: set[str] = set()
+
+
+def cancel_job(task_id: str) -> bool:
+    """Mark job as cancelled.
+
+    E095/E096: Sync function — schedules async work:
+    1. _jobs dict — sync (immediately)
+    2. asyncio.Task in registry — sync cancel
+    3. DB cancel — processed by next /progress-by-protocol call
+
+    E099: Returns False if task not found anywhere.
+    """
+    found = False
+
+    # 1. In-memory _jobs (legacy, sync)
+    if task_id in _jobs:
+        _jobs[task_id]["status"] = "cancelled"
+        _jobs[task_id]["message"] = "Отменено пользователем"
+        found = True
+
+    # 2. asyncio.Task cancel — stop CPU work immediately
+    bg_task = _active_transcription_tasks.get(task_id)
+    if bg_task:
+        if not bg_task.done():
+            bg_task.cancel()
+            found = True
+        # pop AFTER cancel — чтобы stale-detection не сработал
+        _active_transcription_tasks.pop(task_id, None)
+
+    # 3. Schedule DB cancel — only if found somewhere (E099)
+    if found:
+        _pending_db_cancels.add(task_id)
+    else:
+        # E106: Log if task not found
+        logger.warning(
+            "cancel_job_not_found",
+            task_id=task_id,
+            in_jobs=task_id in _jobs,
+            registry_size=len(_active_transcription_tasks),
+        )
+
+    return found
+
+
+async def _await_cancelled_task(bg_task) -> None:
+    """E097/E100: Await cancelled task to gracefully clean up resources."""
+    try:
+        await bg_task
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logging.getLogger(__name__).warning("cancelled_task_exception", error=str(e))
+        return
+    if not bg_task.cancelled():
+        logging.getLogger(__name__).warning("task_ignored_cancel", task_repr=str(bg_task))
+
+
+def get_pending_cancels() -> set[str]:
+    """E096: Get and clear pending DB cancels."""
+    pending = _pending_db_cancels.copy()
+    _pending_db_cancels.clear()
+    return pending
+
+
+def cleanup_old_jobs(max_age_seconds: int = 3600):
+    """Remove jobs older than max_age_seconds."""
+    import time
+    now = time.time()
+    to_delete = [
+        task_id for task_id, job in _jobs.items()
+        if isinstance(job, dict) and "updated_at" in job
+        and now - job["updated_at"] > max_age_seconds
+    ]
+    for task_id in to_delete:
+        del _jobs[task_id]
+    return len(to_delete)
+
+

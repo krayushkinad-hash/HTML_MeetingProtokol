@@ -1,0 +1,65 @@
+# =============================================================================
+# Caddy reverse proxy — auto-TLS via Let's Encrypt
+# =============================================================================
+# Replace hmp.example.com with your real domain.
+# Requires DNS A/AAAA record pointing at the server before `docker compose up`.
+# =============================================================================
+
+{
+    # Admin API off — disable it in production
+    admin off
+
+    email {$ACME_EMAIL}
+
+    # Local CA for offline testing — leave commented in prod
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# ---------------------------------------------------------------------------
+# Main site
+# ---------------------------------------------------------------------------
+{$DOMAIN} {
+    encode zstd gzip
+
+    # Reverse proxy the API
+    reverse_proxy backend:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        transport http {
+            dial_timeout 30s
+            response_header_timeout 600s
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # Security headers (in addition to nginx — Caddy is the edge, so apply here)
+    # -----------------------------------------------------------------------
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    # Rate limit: 100 r/s per IP, burst 200
+    rate_limit {$DOMAIN} 100r/s 200
+
+    # Logging
+    log {
+        output stdout
+        level INFO
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Optional: redirect apex → www (uncomment + adjust)
+# ---------------------------------------------------------------------------
+# www.{$DOMAIN} {
+#     redir https://{$DOMAIN}{uri} permanent
+# }

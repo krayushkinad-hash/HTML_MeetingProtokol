@@ -1,0 +1,117 @@
+# =============================================================================
+# HTML_MeetingProtokol — systemd unit for the FastAPI backend
+# =============================================================================
+# Install:    sudo cp systemd/hmp-backend.service /etc/systemd/system/
+#             sudo systemctl daemon-reload
+#             sudo systemctl enable --now hmp-backend
+# Env file:   /etc/hmp/backend.env  (chmod 600, owned by hmp:hmp)
+# Data dir:   /var/lib/hmp/.html_mp
+# =============================================================================
+
+[Unit]
+Description=HTML_MeetingProtokol Backend (FastAPI/uvicorn)
+Documentation=https://hmp.example.com/docs
+After=network-online.target postgresql.service
+Wants=network-online.target
+# If running alongside the Postgres container instead of a host service,
+# comment the postgresql.service line above and use docker compose to
+# manage the DB.
+
+[Service]
+# ---------------------------------------------------------------------------
+# Runtime type
+# ---------------------------------------------------------------------------
+Type=simple
+# notify would require sd_notify protocol support in the app — keep simple
+# for a vanilla uvicorn deployment.
+
+# ---------------------------------------------------------------------------
+# User / group
+# ---------------------------------------------------------------------------
+User=hmp
+Group=hmp
+
+# ---------------------------------------------------------------------------
+# Working dir + paths
+# ---------------------------------------------------------------------------
+WorkingDirectory=/opt/hmp-backend
+EnvironmentFile=/etc/hmp/backend.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# ---------------------------------------------------------------------------
+# Process — single worker per ADR-009 (memory-bounded transcription)
+# ---------------------------------------------------------------------------
+ExecStart=/opt/hmp-backend/.venv/bin/uvicorn \
+    app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1 \
+    --access-log \
+    --no-server-header
+
+# Pre-start: run DB migrations before bringing up the API
+# Set HMP_SKIP_MIGRATIONS=true in env if you want to disable
+ExecStartPre=/bin/bash -c '\
+    if [ "$$HMP_SKIP_MIGRATIONS" != "true" ]; then \
+        echo "[hmp-backend] Running alembic upgrade head"; \
+        /opt/hmp-backend/.venv/bin/alembic upgrade head; \
+    fi'
+
+# Graceful reload on SIGHUP (uvicorn picks this up)
+ExecReload=/bin/kill -HUP $MAINPID
+
+# ---------------------------------------------------------------------------
+# Restart policy
+# ---------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# ---------------------------------------------------------------------------
+# Resource limits
+# ---------------------------------------------------------------------------
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=4G
+TasksMax=512
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ---------------------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# Writable dirs
+ReadWritePaths=/var/lib/hmp /var/log/hmp /opt/hmp-backend/logs /tmp
+
+# ---------------------------------------------------------------------------
+# Logging — journald
+# ---------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hmp-backend
+
+[Install]
+WantedBy=multi-user.target

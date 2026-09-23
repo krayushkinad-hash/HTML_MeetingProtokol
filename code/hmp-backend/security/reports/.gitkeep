@@ -1,0 +1,26 @@
+# Reports directory — security audit outputs
+
+Generated artefacts live here. They are intentionally **not** committed to
+version control (see `.gitignore`); only this `.gitkeep` file is tracked.
+
+Each scanner writes a dated file:
+
+| File pattern | Producer |
+|--------------|----------|
+| `pip-audit-YYYY-MM-DD.json` | `pip-audit.sh` |
+| `safety-YYYY-MM-DD.json` | `safety.sh` |
+| `bandit-YYYY-MM-DD.json` | `bandit.sh` |
+| `secrets-YYYY-MM-DD.txt` | `secrets-scan.sh` |
+| `trivy-YYYY-MM-DD.json` | `trivy.sh` |
+| `headers-YYYY-MM-DD.md` | `headers-check.sh` |
+| `cors-YYYY-MM-DD.md` | `cors-check.sh` |
+| `authn-YYYY-MM-DD.md` | `authn-check.sh` |
+| `rate-limit-YYYY-MM-DD.md` | `rate-limit-check.sh` |
+| `zap-baseline-YYYY-MM-DD.html` | `owasp-zap.sh` |
+| `zap-baseline-YYYY-MM-DD.json` | `owasp-zap.sh` |
+| `<tool>-YYYY-MM-DD.log` | `run-all.sh` (per-tool stdout) |
+| `security-audit-YYYY-MM-DD.md` | `run-all.sh` (aggregated) |
+
+These reports may contain vulnerabilities, secret-material candidates, or
+internal hostnames. Treat them as **confidential** and never publish them
+in public artifacts or pastebins.
