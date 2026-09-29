@@ -512,3 +512,12 @@ End-to-end сценарий (для часовой записи):
 | US-089 | — | Whisper FastAPI server | /opt/whisper-server/app/main.py |
 | US-089 | — | CORS middleware | fastapi.middleware.cors |
 | US-089 | — | systemd + deploy | whisper-server.service, deploy-whisper-only.sh |
+
+
+### US-090: Клик на таймкод → перемотка плеера
+
+| US | API endpoint | Table | Component |
+|---|---|---|---|
+| US-090 | — | utterance.start_sec | protocol.js:wireTimestampButtons() |
+| US-091 | GET /export/docx | utterance | export.py:fmt_ts() |
+| US-092 | POST /screenshots | screenshot | auto_screenshots.py |

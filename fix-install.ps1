@@ -196,6 +196,8 @@ Write-Host "  Installing main requirements..." -ForegroundColor Yellow
 $pipOutput = & .\.venv\Scripts\python.exe -m pip install --no-cache-dir --no-deps --index-url "https://pypi.org/simple/" --trusted-host "pypi.org" --trusted-host "files.pythonhosted.org" -r requirements-minimal.txt 2>&1
 $pipOutput | Out-Host
 
+# E265: Pillow + imagehash для US-019/US-092 авто-скриншоты
+.venv\Scripts\pip.exe install pillow imagehash
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  ERROR: pip install failed (exit code $LASTEXITCODE)" -ForegroundColor Red

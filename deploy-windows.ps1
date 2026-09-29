@@ -754,6 +754,8 @@ if (Test-Path $backendReqFile) {
     try {
         & pip install @pipCommonArgs -r requirements-minimal.txt 2>&1 | Out-Null
         Write-OK "Base dependencies installed"
+# E265: Pillow + imagehash для US-019/US-092 авто-скриншоты
+.venv\Scripts\pip.exe install pillow imagehash
     } catch {
         Write-Warn "Some base dependencies failed (continuing)"
     }

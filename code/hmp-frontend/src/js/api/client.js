@@ -140,6 +140,9 @@ export const api = {
     },
     getScreenshot: (id) => request('GET', '/screenshots/' + id),
     deleteScreenshot: (id) => request('DELETE', '/screenshots/' + id),
+    synthesizeScreenshots: (protocolId, opts = {}) => request('POST',
+        `/protocols/${protocolId}/screenshots/synthesize`,
+        { body: { max_screenshots: opts.max_screenshots || 10, strategy: opts.strategy || 'uniform' } }),
 
     // === Decisions ===
     listDecisions: (protocolId) =>

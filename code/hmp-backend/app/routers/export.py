@@ -56,7 +56,24 @@ def _build_docx(protocol: Protocol, utterances: list[Utterance], output_path: Pa
     Real implementation (US-050) will use a Jinja-like template with
     headers/footers, styles, decisions/action-items tables, screenshot
     thumbnails, etc. This is a deterministic placeholder.
+
+    US-091: таймкоды в формате ЧЧ:ММ:СС (или MM:SS если < 1 часа).
     """
+    from math import isfinite
+
+    def fmt_ts(seconds: float) -> str:
+        """Формат ЧЧ:ММ:СС. Минуты без ведущего нуля — 12:34.
+        Часы с ведущим — 01:12:34. Секунды округляются до целого."""
+        if not isfinite(seconds) or seconds < 0:
+            return "0:00"
+        sec_total = int(round(seconds))
+        h = sec_total // 3600
+        m = (sec_total % 3600) // 60
+        s = sec_total % 60
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
     doc = Document()
 
     # Title
@@ -87,7 +104,8 @@ def _build_docx(protocol: Protocol, utterances: list[Utterance], output_path: Pa
         doc.add_paragraph("[Транскрипт отсутствует]")
     else:
         for u in utterances:
-            stamp = f"[{u.start_sec:.1f}–{u.end_sec:.1f}]"
+            # US-091: ЧЧ:ММ:СС (или MM:SS для коротких)
+            stamp = f"[{fmt_ts(u.start_sec)}–{fmt_ts(u.end_sec)}]"
             doc.add_paragraph(f"{stamp} {u.text}")
 
     # Decisions summary
@@ -376,7 +394,7 @@ async def archive_protocol(protocol_id: uuid.UUID, db: AsyncSession = Depends(ge
             if u.speaker_id:
                 sp = await db.get(Speaker, u.speaker_id)
                 speaker_name = f"{sp.display_name}: " if sp else ""
-            text_lines.append(f"[{int(u.start_sec)}s] {speaker_name}{u.text}")
+            text_lines.append(f"[{fmt_ts(u.start_sec)}] {speaker_name}{u.text}")
         zf.writestr("transcript.txt", "\n".join(text_lines))
 
         # Source file

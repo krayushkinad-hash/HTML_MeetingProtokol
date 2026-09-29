@@ -113,3 +113,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# US-019/US-092: проверка Pillow + imagehash для авто-скриншотов
+try:
+    import imagehash
+    print("✅ imagehash installed (version: imagehash for change_detection)")
+except ImportError:
+    print("❌ imagehash MISSING — required for change_detection strategy")
+    print("   Fix: pip install imagehash")
+    sys.exit(1)
+
+try:
+    from PIL import Image
+    print("✅ Pillow installed (version: Image for screenshots)")
+except ImportError:
+    print("❌ Pillow MISSING — required for screenshots")
+    print("   Fix: pip install pillow")
+    sys.exit(1)

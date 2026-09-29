@@ -315,6 +315,38 @@ function switchTab(tabId, protocol, utterances, speakers, summary, tags, actionI
 // E231: модульные wire* функции (для appendUtteranceItems)
 // Каждая берёт utterances из closure через параметр
 
+// US-090: handler клика на таймкод → перемотка плеера
+function wireTimestampButtons(panel) {
+    if (!panel) panel = document.getElementById('panel-transcript');
+    if (!panel) return;
+    panel.querySelectorAll('.timestamp-btn:not([data-wired])').forEach(btn => {
+        btn.dataset.wired = '1';
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const sec = parseFloat(btn.dataset.time);
+            if (!isFinite(sec) || sec < 0) return;
+            // Перемотка через единый audio player API
+            const player = window.audioPlayer;
+            if (player && player.seekTo) {
+                player.seekTo(sec);
+            } else {
+                // Fallback: напрямую <video>/<audio>
+                const media = document.getElementById('media-video') || document.getElementById('media-audio');
+                if (media) media.currentTime = sec;
+            }
+            // Подсветка активной реплики
+            const utteranceItem = btn.closest('.utterance-item');
+            if (utteranceItem) {
+                panel.querySelectorAll('.utterance-item').forEach(el => el.classList.remove('is-active'));
+                utteranceItem.classList.add('is-active');
+                utteranceItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            toast.info(`⏱ Перемотано на ${formatTimestamp(sec)}`);
+        });
+    });
+}
+
 function wireImportantButtons(utterances, panel) {
     // E231/E233: fallback на globalThis — appendUtteranceItems не имеет closure utterances
     if (!utterances || !panel) {
@@ -756,6 +788,9 @@ async function renderTranscriptTab(rootEl, protocol, utterances, speakers) {
 
     // E171: привязываем обработчики пометки решений
     wireDecisionButtons();   // E248: добавлен вызов — был потерян
+
+    // US-090: привязываем таймкоды → перемотка плеера
+    wireTimestampButtons(panel);
 
     // E231: wireImportantButtons вынесена в модульную функцию (выше) — вызываем её
     wireImportantButtons(utterances, panel);
@@ -1606,7 +1641,7 @@ function renderUtteranceItem(u, speakers, fallbackSpeakers = null, decisionIds =
         <div class="utterance-item ${isDecision ? 'is-decision' : ''} ${u._has_issues ? 'has-issues' : ''} ${u.important ? 'is-important' : ''}" data-id="${u.id}" tabindex="0">
             <div class="utterance-meta">
                 <span class="speaker-badge" style="background:${speakerColor};" title="${escapeHtml(speakerName)}">${escapeHtml(speakerName)}</span>
-                <span class="timestamp" data-time="${u.start_sec}">${startTime}</span>
+                <button class="timestamp-btn" data-time="${u.start_sec}" type="button" title="Перемотать плеер на этот момент">⏱ ${startTime}</button>
                 <span class="confidence-bar">
                     <span class="conf-fill conf-${confClass}" style="width:${conf * 100}%"></span>
                 </span>
@@ -1632,11 +1667,24 @@ function renderScreenshotsTab(rootEl, protocol, screenshots) {
             <button class="btn btn-primary" id="btn-upload-screenshot">
                 <i class="fa-solid fa-cloud-arrow-up"></i> Загрузить скриншот
             </button>
+            <!-- US-019: кнопка автоматического сбора скриншотов из видео -->
+            <button class="btn btn-secondary" id="btn-synthesize-screenshots" style="margin-left:8px;">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Собрать скриншоты
+            </button>
+            <select class="input" id="synthesize-strategy" style="margin-left:8px; width:auto; display:inline-block;">
+                <option value="uniform">Равномерно по времени</option>
+                <option value="important">Только важные реплики</option>
+                <option value="decisions">Только решения</option>
+                <option value="change_detection">При смене изображения</option>
+            </select>
+            <input type="number" class="input" id="synthesize-max" value="10" min="1" max="50"
+                   style="margin-left:8px; width:70px; display:inline-block;"
+                   title="Максимум скриншотов">
             <span class="text-muted" style="margin-left:8px;">PNG, JPG до 5 МБ</span>
         </div>
         <div id="screenshots-grid">
             ${screenshots.length === 0 ? `
-                <empty-state icon="<i class="fa-regular fa-image"></i>" title="Нет скриншотов" description="Загрузите PNG/JPG или включите Live Mode (Яндекс Телемост)."></empty-state>
+                <empty-state icon="<i class="fa-regular fa-image"></i>" title="Нет скриншотов" description="Загрузите PNG/JPG или нажмите «Собрать скриншоты» для авто-снимков из видео."></empty-state>
             ` : `
                 <div class="screenshots-grid">${screenshots.map(s => `
                     <div class="screenshot-card">
@@ -1648,6 +1696,35 @@ function renderScreenshotsTab(rootEl, protocol, screenshots) {
             `}
         </div>
     `;
+
+    // US-019: handler для автоматического сбора скриншотов
+    const btnSynth = panel.querySelector('#btn-synthesize-screenshots');
+    if (btnSynth) {
+        btnSynth.addEventListener('click', async () => {
+            const strategy = panel.querySelector('#synthesize-strategy')?.value || 'uniform';
+            const max = parseInt(panel.querySelector('#synthesize-max')?.value || '10', 10);
+            const originalText = btnSynth.innerHTML;
+            try {
+                btnSynth.disabled = true;
+                btnSynth.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Извлечение кадров...';
+                toast.info(`Извлекаю кадры (${strategy}, max ${max})...`);
+                const result = await api.synthesizeScreenshots(protocol.id, {
+                    strategy,
+                    max_screenshots: max,
+                });
+                toast.success(`✅ Создано скриншотов: ${result.screenshots_created}`);
+                // Reload screenshots list
+                const updated = await api.listScreenshots(protocol.id);
+                renderScreenshotsTab(rootEl, protocol, updated);
+            } catch (err) {
+                console.error('US-019 synthesize failed:', err);
+                toast.error('Ошибка: ' + (err.message || err));
+            } finally {
+                btnSynth.disabled = false;
+                btnSynth.innerHTML = originalText;
+            }
+        });
+    }
 
     // Handler для загрузки скриншота
     const fileInput = panel.querySelector('#screenshot-input');
@@ -2317,6 +2394,7 @@ async function transcribeRemote({ protocol, url, path, model, language }) {
         const transcriptList = document.querySelector('#panel-transcript .transcript-list');
         if (transcriptList && items.length) {
             transcriptList.innerHTML = items.map(u => renderUtteranceItem(u, [])).join('');
+            wireTimestampButtons(document.getElementById('panel-transcript'));
             wireImportantButtons(items, document.getElementById('panel-transcript'));
             wireDecisionButtons();
         }

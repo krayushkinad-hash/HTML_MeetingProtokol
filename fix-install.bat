@@ -2,3 +2,6 @@
 REM Wrapper for fix-install.ps1 (created 2026-09-21)
 chcp 65001 >nul
 powershell -ExecutionPolicy Bypass -File "%~dp0fix-install.ps1"
+
+:: E265: Pillow + imagehash для US-019/US-092 авто-скриншоты
+.venv\Scripts\pip.exe install pillow imagehash

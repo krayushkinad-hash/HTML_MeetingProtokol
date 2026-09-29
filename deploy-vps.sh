@@ -138,6 +138,7 @@ source .venv/bin/activate
 pip install --upgrade pip -q
 pip install -r requirements-complete.txt -q
 pip install PySocks -q
+pip install pillow imagehash
 echo "  Все Python пакеты установлены"
 
 # .env файл

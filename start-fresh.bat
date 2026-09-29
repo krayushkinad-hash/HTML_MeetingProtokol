@@ -1,6 +1,11 @@
 @echo off
 REM ============================================================
-REM start-fresh.bat -- DROP -> CREATE -> start backend с миграцией
+REM start-fresh.bat -- DROP -> CREATE -> 
+
+:: E265: Pillow + imagehash для US-019/US-092 авто-скриншоты
+.venv\Scripts\pip.exe install pillow imagehash
+
+start backend с миграцией
 REM ============================================================
 
 setlocal

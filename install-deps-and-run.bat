@@ -202,7 +202,7 @@ if errorlevel 1 (
         pydantic pydantic-core pydantic-settings ^
         asyncpg sqlalchemy aiosqlite ^
         httpx httpcore h11 sniffio anyio ^
-        python-multipart python-docx pillow lxml ^
+        python-multipart python-docx pillow imagehash lxml ^
         structlog tenacity orjson ^
         openai python-dateutil six ^
         urllib3 certifi charset-normalizer idna ^

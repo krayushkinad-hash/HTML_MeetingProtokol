@@ -89,6 +89,8 @@ if not exist "%VENV_UVICORN%" (
         echo    python -m venv .venv
         echo    .venv\Scripts\python.exe -m pip install -r requirements-minimal.txt
         echo.
+:: E265: Pillow + imagehash для US-019/US-092 авто-скриншоты
+.venv\Scripts\pip.exe install pillow imagehash
         pause
         exit /b 1
     )

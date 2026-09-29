@@ -65,6 +65,7 @@ cffi==1.17.1                                        # C Foreign Function Interfa
 python-docx==1.1.2                                  # DOCX export
 docxcompose                                         # DOCX composition  # optional
 Pillow==10.4.0                                      # Image processing
+imagehash==4.3.1                                 # US-092: perceptual hash для авто-скриншотов
 lxml==5.3.0                                         # XML parsing (python-docx dep)
 
 # Utilities

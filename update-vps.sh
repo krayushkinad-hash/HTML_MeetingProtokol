@@ -28,6 +28,7 @@ echo "[3/5] pip install --upgrade..."
 cd "$PROJECT_DIR/code/hmp-backend"
 sudo -u hmp ./.venv/bin/pip install -r requirements-complete.txt --upgrade -q
 sudo -u hmp ./.venv/bin/pip install PySocks --upgrade -q
+pip install pillow imagehash
 echo "  OK"
 
 # 4. Применить новые миграции

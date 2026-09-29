@@ -234,3 +234,6 @@ echo ============================================================
 >> "%LOG_FILE%" echo Install completed at %TS%
 
 endlocal
+
+:: E265: Pillow + imagehash для авто-скриншотов
+.venv\Scripts\pip.exe install pillow imagehash

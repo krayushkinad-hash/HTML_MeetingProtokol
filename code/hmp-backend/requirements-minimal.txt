@@ -25,6 +25,7 @@ openai>=1.50.0,<2.0.0  # pinned: avoid 3.x (requires httpx2)
 # DOCX
 python-docx>=1.1.0
 pillow>=10.4.0
+imagehash>=4.3.0  # US-019/US-092: perceptual hash для авто-скриншотов
 
 # Observability
 structlog>=24.4.0
