@@ -178,8 +178,14 @@ async def generate_screenshots_for_protocol(
         return screenshots
 
     except Exception as e:
-        logger.error(f"generate_screenshots_for_protocol failed for {protocol_id}: {e}")
-        logger.error(tb_mod.format_exc())
+        import traceback as _tb_cd2
+        tb_text2 = _tb_cd2.format_exc()
+        logger.error(
+            f"generate_screenshots_for_protocol failed for {protocol_id}: "
+            f"{type(e).__name__}: {e}"
+        )
+        logger.error("FULL TRACEBACK:\n" + tb_text2)
+        print("UNIFORM TRACEBACK:", tb_text2, flush=True)
         await db.rollback()
         return []
     finally:
@@ -239,6 +245,7 @@ async def generate_screenshots_change_detection(
     db: Optional[AsyncSession] = None,
 ) -> list[Screenshot]:
     """US-019: скриншот только при существенном изменении кадра."""
+    import traceback as _tb
     logger.info(
         f"US-019 change_detection START: protocol={protocol_id}, "
         f"video={video_path}, output_dir={output_dir}, max={max_screenshots}, "
@@ -249,7 +256,8 @@ async def generate_screenshots_change_detection(
         import imagehash
         logger.info(f"US-019 imagehash={imagehash.__version__}, PIL={Image.__version__}")
     except ImportError as ie:
-        logger.error(f"PIL/imagehash not installed — change_detection unavailable: {ie}")
+        logger.error(f"PIL/imagehash not installed: {ie}")
+        logger.error(_tb.format_exc())
         return []
 
     own_session = db is None
@@ -281,8 +289,12 @@ async def generate_screenshots_change_detection(
             t += sample_interval_sec
 
         # Извлекаем кадры и проверяем хеши
+        sample_str = ', '.join(str(ts) for ts in timestamps[:3]) if timestamps else 'empty'
+        logger.info(f'US-019 sample timestamps: {len(timestamps)} (sample: {sample_str})')
         prev_hash = None
         screenshots = []
+        extract_attempts = 0
+        extract_success = 0
         for ts in timestamps:
             out_path = output_dir / f"shot_{int(ts*1000):010d}.png"
             ok = await extract_frame(video_path, ts, out_path, width=1280)

@@ -1,4 +1,4 @@
-# HTML_MeetingProtokol 1
+# HTML_MeetingProtokol
 
 > **Локальное приложение для протоколирования совещаний**
 >

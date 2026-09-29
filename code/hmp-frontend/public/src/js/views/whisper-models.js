@@ -11,7 +11,7 @@
 
 // US-058: CSS for this view (injected automatically)
 import { toast } from '../utils/toast.js';
-import { api } from '../api/client.js';
+import { api } from '../api/client.js?v=20260923-1817';
 
 const WHISPER_MODELS_CSS_URL = 'src/css/whisper-models.css';
 
