@@ -244,82 +244,96 @@ async def generate_screenshots_change_detection(
     threshold: int = 8,
     db: Optional[AsyncSession] = None,
 ) -> list[Screenshot]:
-    """US-019: скриншот только при существенном изменении кадра."""
-    import traceback as _tb
-    logger.info(
-        f"US-019 change_detection START: protocol={protocol_id}, "
-        f"video={video_path}, output_dir={output_dir}, max={max_screenshots}, "
-        f"interval={sample_interval_sec}s, threshold={threshold}"
-    )
+    """US-019: change_detection — КАЖДЫЙ ШАГ ЛОГИРУЕТСЯ ОТДЕЛЬНО."""
+    logger.info(f"[CD] START protocol={protocol_id} video={video_path.name} max={max_screenshots} thr={threshold}")
+
+    # ШАГ 1: импорт модулей
     try:
         from PIL import Image
         import imagehash
-        logger.info(f"US-019 imagehash={imagehash.__version__}, PIL={Image.__version__}")
+        logger.info(f"[CD] modules OK: imagehash={imagehash.__version__} PIL={Image.__version__}")
     except ImportError as ie:
-        logger.error(f"PIL/imagehash not installed: {ie}")
-        logger.error(_tb.format_exc())
+        logger.error(f"[CD] MODULE MISSING: {type(ie).__name__}: {ie}")
         return []
 
     own_session = db is None
     if own_session:
         db = AsyncSessionLocal()
-    output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ШАГ 3: создать папку
     try:
-        # Узнаём длительность видео
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[CD] output_dir={output_dir}")
+    except Exception as e:
+        logger.error(f"[CD] MKDIR FAILED: {type(e).__name__}: {e}")
+        return []
+
+    # ШАГ 4: ffprobe
+    try:
         probe = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        probe_stdout, _ = await probe.communicate()
-        try:
-            duration = float(probe_stdout.decode().strip())
-        except ValueError:
-            duration = 0.0
-
+        probe_stdout, probe_stderr = await probe.communicate()
+        duration_str = probe_stdout.decode().strip()
+        duration = float(duration_str) if duration_str else 0.0
+        stderr_text = probe_stderr.decode() if probe_stderr else ""
+        logger.info(f"[CD] ffprobe duration={duration:.2f}s stderr={stderr_text[:100]}")
         if duration <= 0:
-            logger.warning(f"Could not determine video duration: {video_path}")
+            logger.error(f"[CD] INVALID DURATION={duration} (видео повреждено или не имеет видеопотока)")
             return []
+    except (ValueError, OSError) as e:
+        logger.error(f"[CD] FFPROBE FAILED: {type(e).__name__}: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"[CD] FFPROBE UNEXPECTED: {type(e).__name__}: {e}")
+        return []
 
-        timestamps = []
-        t = 0.0
-        while t < duration and len(timestamps) < max_screenshots * 3:  # берём с запасом
-            timestamps.append(t)
-            t += sample_interval_sec
+    # ШАГ 5: timestamps
+    timestamps = []
+    t = 0.0
+    while t < duration and len(timestamps) < max_screenshots * 3:
+        timestamps.append(t)
+        t += sample_interval_sec
+    logger.info(f"[CD] generated {len(timestamps)} timestamps (sample={timestamps[:3]})")
 
-        # Извлекаем кадры и проверяем хеши
-        sample_str = ', '.join(str(ts) for ts in timestamps[:3]) if timestamps else 'empty'
-        logger.info(f'US-019 sample timestamps: {len(timestamps)} (sample: {sample_str})')
-        prev_hash = None
-        screenshots = []
-        extract_attempts = 0
-        extract_success = 0
-        for ts in timestamps:
-            out_path = output_dir / f"shot_{int(ts*1000):010d}.png"
-            ok = await extract_frame(video_path, ts, out_path, width=1280)
-            if not ok:
-                continue
+    if not timestamps:
+        logger.error("[CD] NO TIMESTAMPS")
+        return []
 
-            # Считаем pHash
-            try:
-                img = Image.open(out_path)
-                cur_hash = imagehash.phash(img)
-            except Exception as e:
-                logger.warning(f"phash failed at {ts}s: {e}")
-                continue
+    # ШАГ 6: extract + phash
+    prev_hash = None
+    screenshots = []
+    attempts = 0
+    successes = 0
 
-            is_change = False
-            if prev_hash is None:
-                # Первый кадр всегда сохраняем как baseline
+    for ts in timestamps:
+        attempts += 1
+        out_path = output_dir / f"shot_{int(ts*1000):010d}.png"
+        extract_ok = await extract_frame(video_path, ts, out_path, width=1280)
+        if not extract_ok:
+            if attempts <= 3:
+                logger.warning(f"[CD] EXTRACT FAILED at ts={ts:.2f}s (attempts={attempts}/{len(timestamps)})")
+            continue
+        try:
+            img = Image.open(out_path)
+            cur_hash = imagehash.phash(img)
+            successes += 1
+        except Exception as e:
+            logger.warning(f"[CD] PHASH FAILED at ts={ts}: {type(e).__name__}: {e}")
+            continue
+        is_change = False
+        if prev_hash is None:
+            is_change = True
+            logger.info(f"[CD] baseline ts={ts:.2f}s")
+        else:
+            dist = prev_hash - cur_hash
+            if dist >= threshold:
                 is_change = True
-            else:
-                # Hamming distance
-                dist = prev_hash - cur_hash
-                if dist >= threshold:
-                    is_change = True
-
-            if is_change and len(screenshots) < max_screenshots:
+                logger.info(f"[CD] change detected ts={ts:.2f}s dist={dist}")
+        if is_change and len(screenshots) < max_screenshots:
+            try:
                 shot = Screenshot(
                     protocol_id=protocol_id,
                     timestamp_sec=round(ts, 3),
@@ -331,22 +345,24 @@ async def generate_screenshots_change_detection(
                 )
                 db.add(shot)
                 screenshots.append(shot)
+            except Exception as e:
+                logger.error(f"[CD] DB ADD FAILED: {type(e).__name__}: {e}")
+        prev_hash = cur_hash
 
-            prev_hash = cur_hash
+    logger.info(f"[CD] EXTRACT STATS: attempts={attempts}, successes={successes}, saved={len(screenshots)}/{len(timestamps)}")
 
+    # ШАГ 7: commit
+    try:
         await db.commit()
         for s in screenshots:
             await db.refresh(s)
-
-        logger.info(
-            f"US-019 change_detection: created {len(screenshots)}/{len(timestamps)} screenshots "
-            f"for {protocol_id} (threshold={threshold})"
-        )
-        return screenshots
+        logger.info(f"[CD] DONE: created {len(screenshots)} screenshots")
     except Exception as e:
-        logger.error(f"change_detection failed: {e}")
+        logger.error(f"[CD] DB COMMIT FAILED: {type(e).__name__}: {e}")
         await db.rollback()
         return []
     finally:
         if own_session:
             await db.close()
+
+    return screenshots
