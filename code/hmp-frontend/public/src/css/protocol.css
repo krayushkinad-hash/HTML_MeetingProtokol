@@ -148,32 +148,6 @@ tab-bar {
     color: var(--accent);
 }
 
-/* US-090: кнопка-таймкод → перемотка плеера */
-.timestamp-btn {
-    font-variant-numeric: tabular-nums;
-    font-family: monospace;
-    font-size: 11px;
-    background: var(--bg-secondary, #f1f5f9);
-    border: 1px solid var(--border-color, #e2e8f0);
-    border-radius: 4px;
-    padding: 2px 6px;
-    cursor: pointer;
-    color: var(--text-primary, #0f172a);
-    transition: background 0.15s, color 0.15s;
-}
-.timestamp-btn:hover {
-    background: var(--accent, #2563eb);
-    color: #fff;
-    border-color: var(--accent, #2563eb);
-}
-.timestamp-btn:active {
-    transform: scale(0.97);
-}
-.utterance-item.is-active {
-    background: rgba(37, 99, 235, 0.08);
-    border-left: 3px solid var(--accent, #2563eb);
-}
-
 .confidence-bar {
     flex: 0 0 40px;           /* E143: уже */
     height: 2px;

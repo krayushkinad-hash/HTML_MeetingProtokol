@@ -370,7 +370,7 @@ async def synthesize_screenshots(
 # E266: debug endpoint для диагностики US-019
 # ============================================================================
 
-@router.get("/_debug_screenshot")
+@router.get("/_debug/screenshot")
 async def debug_screenshot():
     """Показывает статус всех зависимостей для скриншотов."""
     import sys
