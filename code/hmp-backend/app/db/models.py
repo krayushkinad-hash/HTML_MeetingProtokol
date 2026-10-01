@@ -4,6 +4,7 @@ All tables from /root/.hermes/profiles/alex3/projects/HTML_MeetingProtokol/artif
 """
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 
@@ -24,6 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from typing import Optional
 
 from app.db.types import BYTEAType, GUID, JSONType
 
@@ -42,6 +44,43 @@ protocol_status_enum = ENUM(
     "loaded", "transcribing", "diarizing", "ready", "failed", "live",
     name="protocol_status",
 )
+
+
+class ProtocolStatus(str, enum.Enum):
+    """Python-side enum mirror of protocol_status_enum (used by tests/fixtures)."""
+    LOADED = "loaded"
+    TRANSCRIBING = "transcribing"
+    DIARIZING = "diarizing"
+    READY = "ready"
+    FAILED = "failed"
+    LIVE = "live"
+    RECORDING = "live"  # alias used by tests/conftest.py for in-progress recording
+
+
+__all__ = [
+    "Base",
+    "ProtocolStatus",
+    "UserSetting",
+    "AudioFile",
+    "Folder",
+    "Protocol",
+    "TranscriptionTask",
+    "VoiceProfile",
+    "Speaker",
+    "Utterance",
+    "Screenshot",
+    "Decision",
+    "ActionItem",
+    "Tag",
+    "ProtocolTag",
+    "Summary",
+    "DictionaryTerm",
+    "BotCommand",
+    "ExportRecord",
+    "CalendarEvent",
+    "LiveSession",
+    "AuditLog",
+]
 audio_source_enum = ENUM("local", "url", "telegram", name="audio_source")
 term_category_enum = ENUM(
     "name", "product", "abbreviation", "other", name="term_category"
@@ -229,7 +268,7 @@ class Protocol(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Relationships
-    audio_file: Mapped["AudioFile"] = relationship(lazy="joined")
+    audio_file: Mapped[Optional["AudioFile"]] = relationship(lazy="joined")  # E283: Pydantic schema fix
     folder: Mapped["Folder | None"] = relationship(back_populates="protocols")
     utterances: Mapped[list["Utterance"]] = relationship(
         back_populates="protocol", cascade="all, delete-orphan"
@@ -395,6 +434,7 @@ class Utterance(Base):
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
     low_confidence: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     important: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_decision: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     corrected_by_llm: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     action_item_id: Mapped[uuid.UUID | None] = mapped_column(GUID)
     created_at: Mapped[datetime] = mapped_column(

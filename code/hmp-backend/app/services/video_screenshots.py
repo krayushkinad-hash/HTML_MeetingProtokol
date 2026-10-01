@@ -20,6 +20,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Protocol, Screenshot, Utterance
 from app.db.session import AsyncSessionLocal
 
+
+import subprocess as _sp_local
+
+def _sp_run(cmd, timeout=30):
+    """Синхронный subprocess.run. E271: для обхода проблем с asyncio.create_subprocess_exec на Windows."""
+    import subprocess as sp
+    try:
+        r = sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=sp.CREATE_NO_WINDOW if hasattr(sp, "CREATE_NO_WINDOW") else 0,
+        )
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return -1, "", f"command not found: {cmd[0]}"
+    except sp.TimeoutExpired:
+        return -2, "", f"timeout after {timeout}s"
+    except Exception as e:
+        return -3, "", str(e)
+
+
+async def _sp_run_async(cmd, timeout=30):
+    """Async wrapper через asyncio.to_thread."""
+    import asyncio
+    return await asyncio.to_thread(_sp_run, cmd, timeout)
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,15 +71,12 @@ async def extract_frame(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # Сначала проверяем что в видео вообще есть видеопоток (а не только аудио)
-    probe = await asyncio.create_subprocess_exec(
+    rc, probe_stdout, probe_stderr = await _sp_run_async([
         "ffprobe", "-v", "error", "-select_streams", "v",
         "-show_entries", "stream=index", "-of", "csv=p=0",
         str(video_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    probe_stdout, _ = await probe.communicate()
-    has_video_stream = bool(probe_stdout.decode("utf-8", errors="replace").strip())
+    ], timeout=10)
+    has_video_stream = bool(probe_stdout.strip())
     if not has_video_stream:
         logger.warning(f"No video stream in {video_path} — это аудио, скриншоты невозможны")
         return False
@@ -67,18 +92,13 @@ async def extract_frame(
         + ["-frames:v", "1", "-q:v", "2", str(output_path)],
     ]:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            rc, stdout, stderr = await _sp_run_async(cmd, timeout=30)
+            if rc == 0 and output_path.exists() and output_path.stat().st_size > 0:
                 return True
             # Логируем первую попытку если упала
-            if proc.returncode != 0:
-                err_msg = stderr.decode("utf-8", errors="replace")[-300:]
-                logger.warning(f"ffmpeg attempt failed: ...{err_msg}")
+            if rc != 0:
+                err_msg = (stderr or "")[-300:]
+                logger.warning(f"ffmpeg attempt failed rc={rc}: ...{err_msg}")
         except FileNotFoundError:
             logger.error("ffmpeg not found in PATH")
             return False
@@ -154,15 +174,12 @@ async def generate_screenshots_for_protocol(
                 continue
 
             # Создаём запись в БД
-            file_size = out_path.stat().st_size
+            file_size_bytes = out_path.stat().st_size
             shot = Screenshot(
                 protocol_id=protocol_id,
                 timestamp_sec=round(ts, 3),
                 file_path=str(out_path),
-                file_size=file_size,
-                mime_type="image/png",
-                source=f"auto_{strategy}",
-                captured_at=datetime.now(timezone.utc),
+                file_size_kb=file_size_bytes // 1024 if file_size_bytes else None,
             )
             db.add(shot)
             screenshots.append(shot)
@@ -185,7 +202,6 @@ async def generate_screenshots_for_protocol(
             f"{type(e).__name__}: {e}"
         )
         logger.error("FULL TRACEBACK:\n" + tb_text2)
-        print("UNIFORM TRACEBACK:", tb_text2, flush=True)
         await db.rollback()
         return []
     finally:
@@ -270,15 +286,15 @@ async def generate_screenshots_change_detection(
 
     # ШАГ 4: ffprobe
     try:
-        probe = await asyncio.create_subprocess_exec(
+        rc, stdout, stderr = await _sp_run_async([
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        probe_stdout, probe_stderr = await probe.communicate()
-        duration_str = probe_stdout.decode().strip()
+        ], timeout=10)
+        probe_stdout = stdout or ""
+        probe_stderr = stderr or ""
+        duration_str = probe_stdout.strip()
         duration = float(duration_str) if duration_str else 0.0
-        stderr_text = probe_stderr.decode() if probe_stderr else ""
+        stderr_text = probe_stderr
         logger.info(f"[CD] ffprobe duration={duration:.2f}s stderr={stderr_text[:100]}")
         if duration <= 0:
             logger.error(f"[CD] INVALID DURATION={duration} (видео повреждено или не имеет видеопотока)")
@@ -334,14 +350,12 @@ async def generate_screenshots_change_detection(
                 logger.info(f"[CD] change detected ts={ts:.2f}s dist={dist}")
         if is_change and len(screenshots) < max_screenshots:
             try:
+                file_size_bytes = out_path.stat().st_size
                 shot = Screenshot(
                     protocol_id=protocol_id,
                     timestamp_sec=round(ts, 3),
                     file_path=str(out_path),
-                    file_size=out_path.stat().st_size,
-                    mime_type="image/png",
-                    source="auto_change_detection",
-                    captured_at=datetime.now(timezone.utc),
+                    file_size_kb=file_size_bytes // 1024 if file_size_bytes else None,
                 )
                 db.add(shot)
                 screenshots.append(shot)

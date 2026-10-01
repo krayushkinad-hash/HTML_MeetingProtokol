@@ -369,7 +369,7 @@ async def batch_move_protocols(
                 detail="Папка не найдена",
             )
 
-    from datetime import datetime
+    from datetime import datetime, timezone
     for pid in body.protocol_ids:
         protocol = await db.get(Protocol, pid)
         if protocol:

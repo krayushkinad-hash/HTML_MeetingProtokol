@@ -68,8 +68,13 @@ REM STEP 1/4: Kill all processes
 REM ============================================================
 echo [1/4] Killing all processes...
 
-REM Kill ALL python
-taskkill /F /IM python.exe 2>nul
+REM Kill ALL python (E268: более агрессивно — двойной kill с паузой)
+taskkill /F /IM python.exe /T 2>nul
+powershell -Command "Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force" 2>nul
+REM Ждём чтобы процессы точно умерли
+timeout /t 5 /nobreak >nul
+REM Дополнительная проверка — если процессы всё ещё живы, выводим предупреждение
+powershell -Command "$alive = Get-Process python -ErrorAction SilentlyContinue; if ($alive) { Write-Host 'WARNING: ' $alive.Count ' Python processes still alive after kill' }"
 
 REM Kill uvicorn
 taskkill /F /IM uvicorn.exe 2>nul
@@ -85,8 +90,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5173') do (
 )
 
 REM Close windows by title
-taskkill /FI "WINDOWTITLE eq HMP Backend*" /F 2>nul
-taskkill /FI "WINDOWTITLE eq HMP Frontend*" /F 2>nul
+REM E270: wildcards в WINDOWTITLE eq не работают — точное совпадение
+taskkill /FI "WINDOWTITLE eq HMP Backend" /F 2>nul
+taskkill /FI "WINDOWTITLE eq HMP Frontend" /F 2>nul
 
 echo   All processes killed.
 timeout /t 2 /nobreak >nul
@@ -132,15 +138,24 @@ echo   All checks passed.
 echo.
 
 REM ============================================================
-REM STEP 3/4: Start backend + frontend
+REM ============================================================
+REM STEP 3/4: Starting services
 REM ============================================================
 echo [3/4] Starting services...
 
+REM E269: явно добавляем типичные пути FFmpeg в PATH
+if exist "C:\ffmpeg\bin\ffmpeg.exe" set "PATH=C:\ffmpeg\bin;%PATH%"
+if exist "C:\Program Files\ffmpeg\bin\ffmpeg.exe" set "PATH=C:\Program Files\ffmpeg\bin;%PATH%"
+echo   FFmpeg PATH configured
+
 REM Start PostgreSQL
-docker --version >nul 2>&1
+REM E229: docker --version не проверяет daemon — используем docker info
+docker info >nul 2>&1
 if not errorlevel 1 (
     echo   Starting PostgreSQL...
     docker start hmp-postgres >nul 2>&1
+) else (
+    echo   [WARN] Docker daemon не запущен. Запустите Docker Desktop.
 )
 
 REM Start backend
@@ -163,7 +178,7 @@ REM Start frontend (serve public/ which now has both index.html and src/)
 echo   Starting frontend on http://127.0.0.1:5173...
 start "HMP Frontend" cmd /k "cd /d %PUBLIC_DIR% && python -m http.server 5173"
 
-timeout /t 3 /nobreak >nul
+timeout /t 5 /nobreak >nul
 echo.
 
 REM ============================================================

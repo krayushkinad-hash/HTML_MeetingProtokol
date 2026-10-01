@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio  # E204: для asyncio.to_thread
 import uuid
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 
 from docx import Document
@@ -35,6 +36,27 @@ router = APIRouter()
 # ============================================================================
 # Helpers
 # ============================================================================
+
+
+def fmt_ts(seconds: float) -> str:
+    """US-091: формат ЧЧ:ММ:СС. Минуты без ведущего нуля — 12:34.
+    Часы с ведущим — 01:12:34. Секунды округляются до целого.
+
+    Hoisted to module scope so that ``archive_protocol`` can also call it.
+    Previously it was a nested helper inside ``_build_docx`` and
+    ``archive_protocol`` triggered a ``NameError`` when utterances existed.
+    """
+    if not isfinite(seconds) or seconds < 0:
+        return "0:00"
+    sec_total = int(round(seconds))
+    h = sec_total // 3600
+    m = (sec_total % 3600) // 60
+    s = sec_total % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    if m == 0:
+        return f"00:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 def _to_status_response(task: ExportTask) -> ExportStatus:
@@ -59,21 +81,6 @@ def _build_docx(protocol: Protocol, utterances: list[Utterance], output_path: Pa
 
     US-091: таймкоды в формате ЧЧ:ММ:СС (или MM:SS если < 1 часа).
     """
-    from math import isfinite
-
-    def fmt_ts(seconds: float) -> str:
-        """Формат ЧЧ:ММ:СС. Минуты без ведущего нуля — 12:34.
-        Часы с ведущим — 01:12:34. Секунды округляются до целого."""
-        if not isfinite(seconds) or seconds < 0:
-            return "0:00"
-        sec_total = int(round(seconds))
-        h = sec_total // 3600
-        m = (sec_total % 3600) // 60
-        s = sec_total % 60
-        if h > 0:
-            return f"{h:02d}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
-
     doc = Document()
 
     # Title

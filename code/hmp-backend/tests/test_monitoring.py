@@ -1,10 +1,18 @@
-"""Tests for RSSMonitor (memory protection, ADR-010)."""
+"""Tests for RSSMonitor (memory protection, ADR-010).
+
+SKIPPED: app.core.monitoring.RSSMonitor was removed from the codebase
+(see app/main.py:109 note "RSSMonitor не реализует реальную паузу, отключён").
+This entire test file is skipped pending re-implementation.
+"""
 import asyncio
 
-import psutil
 import pytest
 
-from app.core.monitoring import RSSMonitor
+pytest.skip(
+    "app.core.monitoring.RSSMonitor was removed from app/ (see main.py note); "
+    "tests skipped pending re-implementation.",
+    allow_module_level=True,
+)
 
 
 @pytest.mark.asyncio

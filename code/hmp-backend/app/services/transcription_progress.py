@@ -69,9 +69,10 @@ def cancel_job(task_id: str) -> bool:
     # 2. asyncio.Task cancel — stop CPU work immediately
     bg_task = _active_transcription_tasks.get(task_id)
     if bg_task:
+        # E290: found=True даже если задача уже done() — мы её нашли и убрали
         if not bg_task.done():
             bg_task.cancel()
-            found = True
+        found = True
         # pop AFTER cancel — чтобы stale-detection не сработал
         _active_transcription_tasks.pop(task_id, None)
 
@@ -81,10 +82,8 @@ def cancel_job(task_id: str) -> bool:
     else:
         # E106: Log if task not found
         logger.warning(
-            "cancel_job_not_found",
-            task_id=task_id,
-            in_jobs=task_id in _jobs,
-            registry_size=len(_active_transcription_tasks),
+            "cancel_job_not_found [task_id=" + str(task_id) + "]",
+            extra={"in_jobs": task_id in _jobs, "registry_size": len(_active_transcription_tasks)},
         )
 
     return found

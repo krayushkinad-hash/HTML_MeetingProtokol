@@ -14,6 +14,7 @@ from app.core.logging_config import get_logger
 
 # Импорт моделей нужен для reflection в init_db (E042, E046)
 from app.db.models import (  # noqa: F401
+    Base,
     ActionItem,
     ApiUser,
     AudioFile,

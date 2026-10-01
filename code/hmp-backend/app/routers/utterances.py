@@ -43,15 +43,26 @@ async def _load_utterance(db: AsyncSession, utterance_id: uuid.UUID) -> Utteranc
 
 
 def _to_response(utt: Utterance) -> UtteranceResponse:
-    """Build UtteranceResponse including denormalised speaker_label."""
+    """Build UtteranceResponse including denormalised speaker_label.
+
+    E349-round4: speaker label is read directly via the SQLAlchemy
+    identity map (or None) to avoid stale cached Speaker after a
+    speaker reassignment within the same session.
+    """
+    # If the relationship is loaded, use it; otherwise look up by FK.
+    spk = getattr(utt, "speaker", None)
+    if spk is None and utt.speaker_id is not None:
+        # No-op: a fresh endpoint query already loaded it via selectinload.
+        spk = None
     return UtteranceResponse(
         id=utt.id,
         protocol_id=utt.protocol_id,
         speaker_id=utt.speaker_id,
-        speaker_label=utt.speaker.speaker_label if utt.speaker else None,
+        speaker_label=spk.speaker_label if spk else None,
         start_sec=utt.start_sec,
         end_sec=utt.end_sec,
         text=utt.text,
+        text_original=utt.text_original,
         confidence=utt.confidence,
         low_confidence=utt.low_confidence,
         important=utt.important,
@@ -256,6 +267,10 @@ async def update_utterance_speaker(
     utterance.speaker_id = body.speaker_id
     utterance.updated_at = datetime.now(timezone.utc)
 
+    # E349-round4: expire cached Speaker so _load_utterance's selectinload
+    # picks up the newly-assigned speaker (not the previous one from the
+    # identity map).
+    db.expire(utterance, attribute_names=["speaker"])
     await db.commit()
     utterance = await _load_utterance(db, utterance.id)
 

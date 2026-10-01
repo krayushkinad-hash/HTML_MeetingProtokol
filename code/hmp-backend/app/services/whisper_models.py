@@ -619,5 +619,20 @@ class WhisperModelManager:
 # Singleton
 model_manager = WhisperModelManager()
 
+
+def is_model_loaded(model_name: str) -> bool:
+    """Check whether a whisper model is loaded into memory.
+
+    Lightweight boolean probe — returns True when the named model has cached
+    weights on disk and the manager considers it available. Used by the
+    /transcribe/* routers and by tests via ``mock_whisper`` fixture
+    (``monkeypatch.setattr(wm, 'is_model_loaded', lambda n: True)``).
+    """
+    if model_name not in MODELS:
+        return False
+    _, on_disk = model_manager._find_cached_model(model_name)
+    return on_disk > 0
+
+
 # Public list of model names
 AVAILABLE_MODELS = sorted(list(MODELS.keys()))

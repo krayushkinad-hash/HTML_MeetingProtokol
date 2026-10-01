@@ -202,6 +202,15 @@ async def create_summary(
 
     text, used_provider, tokens = await _generate_summary_text(db, req.protocol_id, req)
 
+    # E374: БД-enum summary_provider поддерживает только {local_llama, gigachat,
+    # hermes, manual}. Pydantic-валидатор пропускает "local_ollama" (canonical
+    # имя в API), но на INSERT это даёт InvalidTextRepresentationError → 500.
+    # Нормализуем перед записью в БД.
+    db_provider_map = {
+        "local_ollama": "local_llama",
+    }
+    db_provider = db_provider_map.get(used_provider, used_provider)
+
     # Upsert Summary (1:1 with protocol — unique constraint)
     query = select(Summary).where(Summary.protocol_id == req.protocol_id)
     result = await db.execute(query)
@@ -210,7 +219,7 @@ async def create_summary(
     now = datetime.now(timezone.utc)
     if summary:
         summary.text = text
-        summary.provider = used_provider
+        summary.provider = db_provider
         summary.model = req.provider  # store requested provider as "model" tag
         summary.tokens_used = tokens
         summary.generated_at = now
@@ -224,7 +233,7 @@ async def create_summary(
         summary = Summary(
             protocol_id=req.protocol_id,
             text=text,
-            provider=used_provider,
+            provider=db_provider,
             model=req.provider,
             tokens_used=tokens,
             generated_at=now,
@@ -234,7 +243,7 @@ async def create_summary(
         logger.info(
             "summary_created",
             protocol_id=str(req.protocol_id),
-            provider=used_provider,
+            provider=db_provider,
         )
 
     await db.commit()
@@ -245,7 +254,7 @@ async def create_summary(
         id=summary.id,
         protocol_id=summary.protocol_id,
         text=summary.text,
-        provider=summary.provider,
+        provider=used_provider,  # E374: возвращаем API-имя, не DB-mapped
         model=summary.model,
         tokens_used=summary.tokens_used,
         duration_ms=None,

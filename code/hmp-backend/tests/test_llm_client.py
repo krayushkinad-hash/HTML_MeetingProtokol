@@ -25,8 +25,13 @@ async def test_hermes_generate_success(mock_httpx_post):
     mock_response.raise_for_status = MagicMock()
     mock_httpx_post.return_value = mock_response
 
-    client = HermesClient()
-    text, tokens = await client.generate("Test prompt")
+    with patch("app.services.llm_client.settings") as mock_settings:
+        mock_settings.hermes_api_key = "test-key"
+        mock_settings.hermes_base_url = "https://hermes.test/v1"
+        mock_settings.ollama_timeout = 60
+        mock_settings.llm_model = "hermes-3"
+        client = HermesClient()
+        text, tokens = await client.generate("Test prompt")
 
     assert text == "Test response"
     assert tokens == 100

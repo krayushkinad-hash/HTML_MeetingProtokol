@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 REM ============================================================
 REM install-faster-whisper.bat — install + verify faster-whisper
 REM (Russian comment removed for CMD compatibility)
@@ -236,4 +236,4 @@ echo ============================================================
 endlocal
 
 :: E265: Pillow + imagehash для авто-скриншотов
-.venv\Scripts\pip.exe install pillow imagehash
+.venv\Scripts\pip.exe install pillow imagehash

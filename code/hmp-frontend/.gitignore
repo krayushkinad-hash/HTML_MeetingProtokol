@@ -1,12 +1,21 @@
+# Test artifacts
 node_modules/
-*.log
+coverage/
+playwright-report/
+test-results/
+.nyc_output/
+
+# IDE / OS
 .DS_Store
 .vscode/
 .idea/
-dist/
-build/
-.env
-.env.local
-.cache/
+*.log
+*.swp
+*.bak
 
-.backups/
+# Local config
+.env.local
+.env.*.local
+
+# Package lock (для воспроизводимости)
+# package-lock.json — НЕ игнорируем, он нужен для детерминированных версий

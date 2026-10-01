@@ -1,0 +1,29 @@
+FINAL COVERAGE REPORT (v3, after all agents)
+============================================
+
+TOTAL coverage: 64% (was 55% — +9 percentage points, −470 missed lines)
+
+Pytest results: 615 passed, 17 failed, 2 skipped, 1 error in 170.38s
+
+TOP-5 IMPROVED FILES (by absolute Δ percentage points):
+  1. app/services/auto_screenshots.py     0% → 98%   (+98 pp)
+  2. app/services/llm_client.py            0% → 98%   (+98 pp)
+  3. app/services/diarization.py          23% → 100%  (+77 pp)
+  4. app/routers/health.py                36% → 100%  (+64 pp)
+  5. app/services/transcription_progress.py 33% → 94% (+61 pp)
+
+Notable also:
+  - app/services/whisper_models.py        26% → 82%   (+56 pp)
+  - app/services/transcription.py         was → 89%   (top service)
+
+Remaining failures (17 failed + 1 error) are concentrated in:
+  - test_internal_live.py / _v2.py (websocket streams — 8 failures + 1 error)
+  - test_internal_export_v2.py (1)
+  - test_internal_upgrade.py (1)
+  - test_internal_admin_v2.py (1)
+  - test_internal_diarization / _v2.py (4)
+  - test_internal_transcription_deep.py (1)
+  - test_internal_remote.py (1)
+
+These failing tests still produced coverage (collected by coverage.py) — they
+exercise code paths even when assertions fail.

@@ -3,8 +3,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import delete as sql_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
 
+from app.core.logging_config import get_logger
 from app.db.models import (
     Protocol, Utterance, Speaker, Tag, ActionItem, Decision,
     Summary, TranscriptionTask, Screenshot, AudioFile, Folder,
@@ -12,7 +12,7 @@ from app.db.models import (
 )
 from app.db.session import get_db
 
-logger = logging.getLogger("hmp")
+logger = get_logger("hmp")
 
 router = APIRouter()
 

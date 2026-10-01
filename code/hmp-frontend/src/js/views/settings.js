@@ -41,7 +41,7 @@ export async function renderSettingsView(rootEl) {
         });
     });
 
-    renderTab(rootEl, 'profile');
+    await renderTab(rootEl, 'profile');
 }
 
 /**

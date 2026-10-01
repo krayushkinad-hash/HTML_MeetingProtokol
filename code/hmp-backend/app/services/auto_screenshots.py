@@ -77,10 +77,7 @@ def _save_screenshot_to_db_sync(
         protocol_id=protocol_id,
         timestamp_sec=round(timestamp_sec, 3),
         file_path=str(file_path),
-        file_size=file_size,
-        mime_type=mime_type,
-        source=source,
-        captured_at=datetime.now(timezone.utc),
+        file_size_kb=file_size // 1024 if file_size else None,
     )
     db.add(shot)
     return shot

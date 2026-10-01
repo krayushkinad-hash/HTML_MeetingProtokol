@@ -127,6 +127,7 @@ class UtteranceResponse(BaseModel):
     start_sec: float
     end_sec: float
     text: str
+    text_original: str | None = None  # E349-round4: preserved original transcript
     confidence: float | None
     low_confidence: bool
     important: bool

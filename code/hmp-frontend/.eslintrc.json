@@ -1,0 +1,39 @@
+{
+    "root": true,
+    "env": {
+        "browser": true,
+        "es2022": true,
+        "node": true,
+        "jest": true
+    },
+    "parserOptions": {
+        "ecmaVersion": 2022,
+        "sourceType": "module"
+    },
+    "globals": {
+        "fetch": "readonly",
+        "FormData": "readonly",
+        "URLSearchParams": "readonly",
+        "AbortController": "readonly",
+        "AbortSignal": "readonly",
+        "Blob": "readonly",
+        "Response": "readonly",
+        "Headers": "readonly",
+        "Request": "readonly"
+    },
+    "rules": {
+        "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+        "no-undef": "error",
+        "no-console": "off",
+        "prefer-const": "warn",
+        "eqeqeq": ["error", "always"],
+        "curly": ["error", "multi-line"]
+    },
+    "ignorePatterns": [
+        "node_modules/",
+        "coverage/",
+        "playwright-report/",
+        "test-results/",
+        "*.config.js"
+    ]
+}

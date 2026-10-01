@@ -528,7 +528,7 @@ class TranscriptionService:
                 if use_batched:
                     try:
                         from faster_whisper import BatchedInferencePipeline
-                        logger.info("using_batched_pipeline", chunk_duration=chunk_duration)
+                        logger.info("using_batched_pipeline")
                         # BatchedInferencePipeline работает по chunks из segments_generator
                         # Возвращает генератор сегментов напрямую
                         segments_generator, info = model.transcribe(
